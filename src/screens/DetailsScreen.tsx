@@ -270,12 +270,14 @@ export function DetailsScreen() {
     try {
       const details = await tmdbService.getDetails(selectedItem.id, selectedItem.type);
       
-      const activeFile = item.localFile || (item.localFiles && item.localFiles[0]);
-      if (!activeFile) {
-        throw new Error("No local file associated with this item");
+      const allFiles = item.localFiles || (item.localFile ? [item.localFile] : []);
+      if (allFiles.length === 0) {
+        throw new Error("No local files associated with this item");
       }
 
-      let localFileWithMeta = { ...activeFile };
+      let newLocalFile = undefined;
+      let newLocalFiles = undefined;
+
       if (selectedItem.type === 'tv') {
         const parseSeasonEpisode = (filename: string) => {
           let tempName = filename.replace(/\.[a-zA-Z0-9]+$/, '');
@@ -296,30 +298,35 @@ export function DetailsScreen() {
           return { season: 1, episode: 1 };
         };
 
-        const parsed = parseSeasonEpisode(activeFile.filename);
-        let episodeName: string | undefined = undefined;
-        let stillUrl: string | undefined = undefined;
-        if (parsed.season !== null && parsed.episode !== null) {
-          const epDetails = await tmdbService.getEpisodeDetails(selectedItem.id, parsed.season, parsed.episode);
-          if (epDetails) {
-            episodeName = epDetails.name;
-            stillUrl = epDetails.stillUrl;
+        newLocalFiles = await Promise.all(allFiles.map(async (f) => {
+          const parsed = parseSeasonEpisode(f.filename);
+          let episodeName: string | undefined = undefined;
+          let stillUrl: string | undefined = undefined;
+          if (parsed.season !== null && parsed.episode !== null) {
+            const epDetails = await tmdbService.getEpisodeDetails(selectedItem.id, parsed.season, parsed.episode);
+            if (epDetails) {
+              episodeName = epDetails.name;
+              stillUrl = epDetails.stillUrl;
+            }
           }
-        }
-        localFileWithMeta = {
-          ...activeFile,
-          seasonNumber: parsed.season,
-          episodeNumber: parsed.episode,
-          episodeName,
-          stillUrl,
-        };
+          return {
+            ...f,
+            seasonNumber: parsed.season,
+            episodeNumber: parsed.episode,
+            episodeName,
+            stillUrl,
+          };
+        }));
+      } else {
+        newLocalFile = { ...allFiles[0] };
       }
 
       const fullyMatchedItem: MediaItem = {
         ...selectedItem,
         ...details,
-        localFile: localFileWithMeta,
       };
+      if (newLocalFile) fullyMatchedItem.localFile = newLocalFile;
+      if (newLocalFiles) fullyMatchedItem.localFiles = newLocalFiles;
 
       await storageService.addItem(fullyMatchedItem);
 

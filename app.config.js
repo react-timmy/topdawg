@@ -8,6 +8,12 @@ export default ({ config }) => ({
   icon: "./assets/images/icon.png",
   userInterfaceStyle: "dark",
   newArchEnabled: true,
+  updates: {
+    url: "https://u.expo.dev/3a0b553f-3175-4b67-999b-8c95abf703dd"
+  },
+  runtimeVersion: {
+    policy: "appVersion"
+  },
   splash: {
     image: "./assets/images/splash-icon.png",
     resizeMode: "contain",
