@@ -49,6 +49,7 @@ import { RootStackParamList, MediaItem, EpisodeInfo, WatchProvider, LocalFile } 
 import { tmdbService } from '../services/tmdbService';
 import { storageService } from '../storage/asyncStorage';
 import { animeService } from '../services/animeService';
+import { geminiAIService } from '../services/geminiAIService';
 import { watchProgressService } from '../storage/watchProgressService';
 import { watchHistoryService } from '../storage/watchHistoryService';
 import { useBadgeUnlock } from '../context/BadgeUnlockContext';
@@ -286,34 +287,55 @@ export function DetailsScreen() {
           tempName = tempName.replace(/\s*\([^)]+\)/g, '');
           tempName = tempName.replace(/[\._\+]/g, ' ').trim();
 
-          const seMatch = tempName.match(/(.*?)\b[sS]([0-9]{1,2})[eE]([0-9]{1,2})\b/i) || 
-                          tempName.match(/(.*?)\b([0-9]{1,2})x([0-9]{1,2})\b/i);
+          const seMatch = tempName.match(/(.*?)\b[sS]([0-9]{1,2})[eE]([0-9]{1,2})\b(.*)/i) || 
+                          tempName.match(/(.*?)\b([0-9]{1,2})x([0-9]{1,2})\b(.*)/i);
           if (seMatch) {
-            return { season: parseInt(seMatch[2], 10), episode: parseInt(seMatch[3], 10) };
+            let extractedName = seMatch[4]?.replace(/^[-\s]+/, '').trim();
+            return { season: parseInt(seMatch[2], 10), episode: parseInt(seMatch[3], 10), extractedName: extractedName || undefined };
           }
-          const animeMatch = tempName.match(/(.*?)\s*-\s*([0-9]{1,3})\b/);
+          const animeMatch = tempName.match(/(.*?)\s*-\s*([0-9]{1,4})\b(.*)/);
           if (animeMatch) {
-            return { season: 1, episode: parseInt(animeMatch[2], 10) };
+            let extractedName = animeMatch[3]?.replace(/^[-\s]+/, '').trim();
+            return { season: 1, episode: parseInt(animeMatch[2], 10), extractedName: extractedName || undefined };
           }
-          return { season: 1, episode: 1 };
+          return { season: 1, episode: 1, extractedName: undefined };
         };
 
+        const filenames = allFiles.map(f => f.filename);
+        let aiParsedEpisodes: Record<string, any> = {};
+        try {
+          aiParsedEpisodes = await geminiAIService.batchParseEpisodesWithContext(filenames, selectedItem.title);
+        } catch (e) {
+          console.warn('Gemini batch episode parsing failed:', e);
+        }
+
         newLocalFiles = await Promise.all(allFiles.map(async (f) => {
-          const parsed = parseSeasonEpisode(f.filename);
+          let parsed = parseSeasonEpisode(f.filename);
+          const aiParsed = aiParsedEpisodes[f.filename];
+          if (aiParsed && aiParsed.season !== null && aiParsed.episode !== null) {
+            parsed = {
+              season: aiParsed.season,
+              episode: aiParsed.episode,
+              extractedName: aiParsed.episodeName || parsed.extractedName,
+            };
+          }
+
           let episodeName: string | undefined = undefined;
           let stillUrl: string | undefined = undefined;
           if (parsed.season !== null && parsed.episode !== null) {
-            const epDetails = await tmdbService.getEpisodeDetails(selectedItem.id, parsed.season, parsed.episode);
-            if (epDetails) {
-              episodeName = epDetails.name;
-              stillUrl = epDetails.stillUrl;
+            if (!selectedItem.id.startsWith('anime:')) {
+              const epDetails = await tmdbService.getEpisodeDetails(selectedItem.id, parsed.season, parsed.episode);
+              if (epDetails) {
+                episodeName = epDetails.name;
+                stillUrl = epDetails.stillUrl;
+              }
             }
           }
           return {
             ...f,
             seasonNumber: parsed.season,
             episodeNumber: parsed.episode,
-            episodeName,
+            episodeName: episodeName || parsed.extractedName,
             stillUrl,
           };
         }));
@@ -425,12 +447,24 @@ export function DetailsScreen() {
     await Promise.all(
       seasonFiles.map(async (file) => {
         if (file.episodeNumber !== undefined) {
-          const epDetails = await tmdbService.getEpisodeDetails(currentItem.id, season, file.episodeNumber);
+          let epDetails: EpisodeInfo | null = null;
+          if (!currentItem.id.startsWith('anime:')) {
+            epDetails = await tmdbService.getEpisodeDetails(currentItem.id, season, file.episodeNumber);
+          }
           if (epDetails) {
             fetchedEps.push({
               ...epDetails,
               stillUrl: file.stillUrl ?? epDetails.stillUrl, // Prefer cached file-level still url if set
               name: file.episodeName ?? epDetails.name,
+            });
+          } else {
+            fetchedEps.push({
+              id: `${currentItem.id}-${season}-${file.episodeNumber}`,
+              episodeNumber: file.episodeNumber,
+              seasonNumber: season,
+              name: file.episodeName || `Episode ${file.episodeNumber}`,
+              overview: '',
+              stillUrl: file.stillUrl,
             });
           }
         }

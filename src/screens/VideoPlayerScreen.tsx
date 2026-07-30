@@ -38,11 +38,15 @@ import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withTiming,
+  withRepeat,
+  Easing,
+  cancelAnimation,
   runOnJS,
 } from 'react-native-reanimated';
 import { BlurView } from 'expo-blur';
 import {
   ChevronLeft,
+  ChevronDown,
   Play,
   Pause,
   ListVideo,
@@ -115,7 +119,7 @@ function SkipIcon({ direction }: { direction: 'back' | 'forward' }) {
   const Icon = direction === 'back' ? RotateCcw : RotateCw;
   return (
     <View style={styles.skipIconWrap}>
-      <Icon size={38} color="#ffffff" strokeWidth={2.2} />
+      <Icon size={58} color="#ffffff" strokeWidth={2.2} />
       <Text style={styles.skipIconNum}>10</Text>
     </View>
   );
@@ -136,6 +140,51 @@ function GestureHud({ value }: { value: number }) {
     </Animated.View>
   );
 }
+
+// ─── Next-up countdown bar ────────────────────────────────────────────────────
+
+const NEXT_UP_COUNTDOWN_MS = 10_000;
+
+function NextUpCountdownBar({ onComplete }: { onComplete: () => void }) {
+  const progress = useSharedValue(0);
+
+  useEffect(() => {
+    progress.value = 0;
+    progress.value = withTiming(1, {
+      duration: NEXT_UP_COUNTDOWN_MS,
+      easing: Easing.linear,
+    }, (finished) => {
+      if (finished) runOnJS(onComplete)();
+    });
+    return () => { cancelAnimation(progress); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const fillStyle = useAnimatedStyle(() => ({
+    width: `${progress.value * 100}%`,
+  }));
+
+  return (
+    <View style={nextUpBarStyles.track}>
+      <Animated.View style={[nextUpBarStyles.fill, fillStyle]} />
+    </View>
+  );
+}
+
+const nextUpBarStyles = StyleSheet.create({
+  track: {
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    overflow: 'hidden',
+    marginTop: 6,
+  },
+  fill: {
+    height: '100%',
+    backgroundColor: NF_RED,
+    borderRadius: 2,
+  },
+});
 
 // ─── Main screen ──────────────────────────────────────────────────────────────
 
@@ -171,7 +220,45 @@ export function VideoPlayerScreen() {
   const nextEpisode = currentEpIndex >= 0 ? episodes[currentEpIndex + 1] : undefined;
   const prevEpisode = currentEpIndex > 0 ? episodes[currentEpIndex - 1] : undefined;
 
-  // Controls start hidden — user must tap to reveal (task 4)
+  // ── Season list (derived from all episodes) ───────────────────────────────
+  const seasonNumbers = useMemo(() => {
+    const nums = new Set<number>();
+    for (const ep of episodes) {
+      if (ep.seasonNumber != null) nums.add(ep.seasonNumber);
+    }
+    return [...nums].sort((a, b) => a - b);
+  }, [episodes]);
+
+  // Default: the season of the currently playing episode, else first season
+  const defaultSeason = activeFile?.seasonNumber ?? seasonNumbers[0] ?? null;
+  const [selectedSeason, setSelectedSeason] = useState<number | null>(defaultSeason);
+  const [seasonDropdownOpen, setSeasonDropdownOpen] = useState(false);
+
+  // Episodes visible in the panel — filtered to selected season (or all if no seasons)
+  const visibleEpisodes = useMemo(() => {
+    if (seasonNumbers.length === 0 || selectedSeason === null) return episodes;
+    return episodes.filter((ep) => ep.seasonNumber === selectedSeason);
+  }, [episodes, seasonNumbers, selectedSeason]);
+
+  // ── Episodes panel scroll-to-active ──────────────────────────────────────
+  const episodesScrollRef = useRef<ScrollView>(null);
+  const epCardHeightRef = useRef<number>(78);
+
+  // Capture latest values in refs so the scroll callback is never stale
+  const visibleEpisodesRef = useRef(visibleEpisodes);
+  const activeFileRef = useRef(activeFile);
+  useEffect(() => { visibleEpisodesRef.current = visibleEpisodes; }, [visibleEpisodes]);
+  useEffect(() => { activeFileRef.current = activeFile; }, [activeFile]);
+
+  const scrollToActive = useCallback(() => {
+    const eps = visibleEpisodesRef.current;
+    const af  = activeFileRef.current;
+    const activeIdx = af ? eps.findIndex((ep) => fileKey(ep) === fileKey(af)) : -1;
+    if (activeIdx <= 0) return;
+    const y = 14 + activeIdx * epCardHeightRef.current;
+    episodesScrollRef.current?.scrollTo({ y, animated: true });
+  }, []);
+
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -195,6 +282,28 @@ export function VideoPlayerScreen() {
   }, []);
   const [episodesOpen, setEpisodesOpen] = useState(false);
   const [audioOpen, setAudioOpen] = useState(false);
+
+  // ── Season/scroll effects (episodesOpen must be declared above these) ────
+  // Reset season to the playing episode's season when panel opens
+  useEffect(() => {
+    if (!episodesOpen) return;
+    setSelectedSeason(activeFile?.seasonNumber ?? seasonNumbers[0] ?? null);
+    setSeasonDropdownOpen(false);
+  }, [episodesOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Scroll to the active episode after the panel slide-in finishes (340ms)
+  useEffect(() => {
+    if (!episodesOpen) return;
+    const t = setTimeout(scrollToActive, 340);
+    return () => clearTimeout(t);
+  }, [episodesOpen, scrollToActive]);
+
+  // Re-scroll after user switches season
+  useEffect(() => {
+    if (!episodesOpen) return;
+    const t = setTimeout(scrollToActive, 80);
+    return () => clearTimeout(t);
+  }, [selectedSeason]); // eslint-disable-line react-hooks/exhaustive-deps
   const [showNextUp, setShowNextUp] = useState(false);
   const [videoFill, setVideoFill] = useState(false);
   const pinchScale = useSharedValue(1);
@@ -483,10 +592,15 @@ export function VideoPlayerScreen() {
 
   const skipBy = (delta: number) => {
     if (!player || lockedRef.current) return;
+    const wasPlaying = player.playing;
     const next = Math.max(0, Math.min(player.duration || 0, player.currentTime + delta));
     player.currentTime = next;
     setCurrentTime(next);
     teleportSlider(next);
+    // Restore play state — some expo-video versions internally pause on currentTime assignment
+    if (wasPlaying) {
+      player.play();
+    }
     revealControls();
   };
 
@@ -722,12 +836,20 @@ export function VideoPlayerScreen() {
               <ChevronLeft size={28} color="#ffffff" strokeWidth={2.4} />
             </Pressable>
             <Text style={styles.topTitle} numberOfLines={1}>{topTitle}</Text>
-            {/* Lock button */}
-            <Pressable onPress={toggleLock} hitSlop={14} style={styles.topIconBtn}>
-              {locked
-                ? <Lock size={20} color={NF_RED} strokeWidth={2} />
-                : <Unlock size={20} color="#ffffff" strokeWidth={2} />}
-            </Pressable>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 16 }}>
+              {/* Mute button */}
+              <Pressable onPress={toggleMute} hitSlop={14} style={styles.topIconBtn}>
+                {muted 
+                  ? <VolumeX size={20} color="#a1a1aa" strokeWidth={2} /> 
+                  : <Volume2 size={20} color="#ffffff" strokeWidth={2} />}
+              </Pressable>
+              {/* Lock button */}
+              <Pressable onPress={toggleLock} hitSlop={14} style={styles.topIconBtn}>
+                {locked
+                  ? <Lock size={20} color={NF_RED} strokeWidth={2} />
+                  : <Unlock size={20} color="#ffffff" strokeWidth={2} />}
+              </Pressable>
+            </View>
           </View>
         </LinearGradient>
 
@@ -843,9 +965,10 @@ export function VideoPlayerScreen() {
         >
           <Text style={styles.nextUpLabel}>Next Episode</Text>
           <Text style={styles.nextUpTitle} numberOfLines={2}>{nextEpisodeLabel}</Text>
+          <NextUpCountdownBar onComplete={handleNextEpisode} />
           <Pressable style={styles.nextUpBtn} onPress={handleNextEpisode}>
             <Play size={14} color="#000" fill="#000" />
-            <Text style={styles.nextUpBtnText}>Play</Text>
+            <Text style={styles.nextUpBtnText}>Play Now</Text>
           </Pressable>
         </Animated.View>
       )}
@@ -863,18 +986,13 @@ export function VideoPlayerScreen() {
           <Animated.View
             entering={SlideInRight.duration(280)}
             exiting={SlideOutRight.duration(220)}
-            style={[
-              styles.sidePanel,
-              {
-                width: episodesPanelW,
-                paddingTop: Math.max(insets.top, 0),
-                paddingBottom: padBot + 12,
-              },
-            ]}
+            style={[styles.sidePanel, { width: episodesPanelW }]}
           >
             {/* Header — frosted glass bar */}
             <View style={[styles.panelHeaderWrap, { paddingTop: Math.max(insets.top, 16) }]}>
               <BlurView intensity={60} tint="dark" style={StyleSheet.absoluteFillObject} />
+
+              {/* Title row: "Episodes" + optional season pill + X */}
               <View style={styles.panelHeaderInner}>
                 <View style={styles.panelHeaderText}>
                   <Text style={styles.panelTitle}>Episodes</Text>
@@ -882,25 +1000,92 @@ export function VideoPlayerScreen() {
                     {initialItem.title.replace(/\s*-\s*S\d+E\d+.*$/i, '')}
                   </Text>
                 </View>
-                <Pressable onPress={() => { setEpisodesOpen(false); if (player?.playing) scheduleHide(); }} style={styles.panelCloseBtn} hitSlop={10}>
+
+                {/* Season pill — inline, only when multiple seasons exist */}
+                {seasonNumbers.length > 1 && (
+                  <View style={styles.seasonPillWrap}>
+                    <Pressable
+                      style={[styles.seasonPill, seasonDropdownOpen && styles.seasonPillOpen]}
+                      onPress={() => setSeasonDropdownOpen((v) => !v)}
+                      hitSlop={8}
+                    >
+                      <Text style={styles.seasonPillText}>
+                        {selectedSeason !== null ? `S${selectedSeason}` : 'All'}
+                      </Text>
+                      <ChevronDown
+                        size={12}
+                        color={seasonDropdownOpen ? '#ffffff' : '#a1a1aa'}
+                        strokeWidth={2.5}
+                        style={{ transform: [{ rotate: seasonDropdownOpen ? '180deg' : '0deg' }] }}
+                      />
+                    </Pressable>
+
+                    {/* Dropdown — absolutely positioned below the pill */}
+                    {seasonDropdownOpen && (
+                      <Animated.View entering={FadeIn.duration(140)} style={styles.seasonDropdownList}>
+                        {seasonNumbers.map((s) => {
+                          const isActive = s === selectedSeason;
+                          const epCount = episodes.filter((e) => e.seasonNumber === s).length;
+                          return (
+                            <Pressable
+                              key={s}
+                              style={({ pressed }) => [
+                                styles.seasonDropdownItem,
+                                isActive && styles.seasonDropdownItemActive,
+                                pressed && { opacity: 0.75 },
+                              ]}
+                              onPress={() => {
+                                setSelectedSeason(s);
+                                setSeasonDropdownOpen(false);
+                              }}
+                            >
+                              <View style={styles.seasonDropdownItemLeft}>
+                                {isActive && (
+                                  <View style={styles.seasonDropdownActiveDot} />
+                                )}
+                                <Text style={[
+                                  styles.seasonDropdownItemText,
+                                  isActive && styles.seasonDropdownItemTextActive,
+                                ]}>
+                                  Season {s}
+                                </Text>
+                              </View>
+                              <Text style={styles.seasonDropdownItemCount}>
+                                {epCount} ep{epCount !== 1 ? 's' : ''}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </Animated.View>
+                    )}
+                  </View>
+                )}
+
+                <Pressable
+                  onPress={() => { setEpisodesOpen(false); setSeasonDropdownOpen(false); if (player?.playing) scheduleHide(); }}
+                  style={styles.panelCloseBtn}
+                  hitSlop={10}
+                >
                   <X size={18} color="#a1a1aa" />
                 </Pressable>
               </View>
+
               <View style={styles.panelHeaderDivider} />
             </View>
 
             <ScrollView
+              ref={episodesScrollRef}
               style={styles.panelScroll}
-              contentContainerStyle={styles.panelScrollContent}
+              contentContainerStyle={[styles.panelScrollContent, { paddingBottom: Math.max(padBot, 24) + 12 }]}
               showsVerticalScrollIndicator={false}
             >
-              {episodes.length === 0 && (
+              {visibleEpisodes.length === 0 && (
                 <View style={styles.panelEmptyWrap}>
                   <ListVideo size={32} color="#3f3f46" strokeWidth={1.5} />
                   <Text style={styles.panelEmpty}>No matched episodes in your library for this title.</Text>
                 </View>
               )}
-              {episodes.map((ep, i) => {
+              {visibleEpisodes.map((ep, i) => {
                 const active = activeFile && fileKey(ep) === fileKey(activeFile);
                 const displayName =
                   ep.episodeName?.trim() ||
@@ -911,15 +1096,17 @@ export function VideoPlayerScreen() {
                     key={fileKey(ep)}
                     style={({ pressed }) => [styles.epCard, active && styles.epCardActive, { opacity: pressed ? 0.75 : 1 }]}
                     onPress={() => playEpisode(ep)}
+                    onLayout={i === 0 ? (e) => {
+                      const h = e.nativeEvent.layout.height;
+                      if (h > 0) epCardHeightRef.current = h;
+                    } : undefined}
                   >
-                    {/* Blurred still accent */}
                     {ep.stillUrl && (
                       <Image source={{ uri: ep.stillUrl }} style={styles.epCardBg} blurRadius={18} />
                     )}
                     <View style={styles.epCardOverlay} />
 
                     <View style={styles.epCardInner}>
-                      {/* Still thumbnail */}
                       <View style={styles.epStillWrap}>
                         {ep.stillUrl ? (
                           <Image source={{ uri: ep.stillUrl }} style={StyleSheet.absoluteFillObject} resizeMode="cover" />
@@ -933,7 +1120,6 @@ export function VideoPlayerScreen() {
                         {active && <View style={styles.epActiveDot} />}
                       </View>
 
-                      {/* Meta */}
                       <View style={styles.epMeta}>
                         <Text style={styles.epCode}>{code}{active ? '  ·  Now Playing' : ''}</Text>
                         <Text style={styles.epName} numberOfLines={2}>{displayName}</Text>
@@ -993,17 +1179,6 @@ export function VideoPlayerScreen() {
             >
               {/* ── Audio ── */}
               <Text style={styles.audioSectionLabel}>Audio</Text>
-
-              {/* Mute toggle */}
-              <Pressable style={styles.audioOptionRow} onPress={toggleMute}>
-                <View style={styles.audioOptionIcon}>
-                  {muted ? <VolumeX size={16} color="#a1a1aa" /> : <Volume2 size={16} color="#ffffff" />}
-                </View>
-                <Text style={[styles.audioOptionText, muted && styles.audioOptionTextMuted]}>
-                  {muted ? 'Unmute' : 'Muted — tap to unmute'}
-                </Text>
-                {!muted && <Check size={14} color={NF_RED} strokeWidth={2.5} style={{ marginLeft: 'auto' }} />}
-              </Pressable>
 
               {/* Track info */}
               <View style={styles.audioInfoRow}>
@@ -1210,10 +1385,20 @@ const styles = StyleSheet.create({
   },
 
   // ── Shared right-side panel layout (Episodes + Audio) ─────────────────────
-  sideModalRoot: { flex: 1, flexDirection: 'row' },
+  sideModalRoot: {
+    flex: 1,
+    flexDirection: 'row',
+    // Ensure the modal root always fills the full screen including status bar area
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
   sideBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)' },
   sidePanel: {
-    height: '100%',
+    flex: 1,                   // fills all remaining height — no percentage needed
+    maxWidth: 420,             // cap width so it doesn't go wider than episodesPanelW
     backgroundColor: '#0d0d0f',
     borderLeftWidth: 1,
     borderLeftColor: 'rgba(255,255,255,0.07)',
@@ -1378,4 +1563,87 @@ const styles = StyleSheet.create({
   },
   speedTileText: { color: '#71717a', fontSize: 12, fontWeight: '800' },
   speedTileTextActive: { color: '#000000' },
+
+  // ── Season picker (pill + dropdown) ───────────────────────────────────────
+  // The pill sits inline between the title block and the X button.
+  // The dropdown is absolutely positioned below the pill.
+  seasonPillWrap: {
+    position: 'relative',
+    zIndex: 20, // dropdown must float above episode cards
+  },
+  seasonPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  seasonPillOpen: {
+    backgroundColor: 'rgba(229,9,20,0.15)',
+    borderColor: 'rgba(229,9,20,0.5)',
+  },
+  seasonPillText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  seasonDropdownList: {
+    position: 'absolute',
+    top: 36, // pill height + 4px gap
+    right: 0,
+    minWidth: 160,
+    backgroundColor: '#18181b',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.6,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 16,
+  },
+  seasonDropdownItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255,255,255,0.05)',
+  },
+  seasonDropdownItemActive: {
+    backgroundColor: 'rgba(229,9,20,0.08)',
+  },
+  seasonDropdownItemLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  seasonDropdownActiveDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: NF_RED,
+  },
+  seasonDropdownItemText: {
+    color: '#a1a1aa',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  seasonDropdownItemTextActive: {
+    color: '#ffffff',
+    fontWeight: '700',
+  },
+  seasonDropdownItemCount: {
+    color: '#3f3f46',
+    fontSize: 11,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
 });

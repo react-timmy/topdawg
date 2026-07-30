@@ -490,7 +490,203 @@ export async function parseSingleFilename(
   return result.results[filename] ?? null;
 }
 
+export async function parseEpisodeWithContext(
+  filename: string,
+  showTitle: string
+): Promise<{ season: number | null; episode: number | null; episodeName?: string }> {
+  try {
+    const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+    const systemPrompt = `You are a TV episode parser.
+Extract the season number, episode number, and episode title (if present in the filename).
+Do not guess the episode title from external knowledge, only extract it if it's explicitly written in the filename (after the season/episode markers).
+If it's an anime with absolute numbering (e.g. - 14), season is 1, episode is 14.
+Output ONLY valid JSON with no markdown formatting.
+Schema: {"season": number|null, "episode": number|null, "episodeName": string|null}`;
+
+    const prompt = `The user has a file named: "${filename}"
+This file belongs to the TV show: "${showTitle}"`;
+
+    let content = '';
+    let lastError: any = null;
+    for (const model of GEMINI_MODELS) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: {
+            systemInstruction: systemPrompt,
+            temperature: 0.1,
+            maxOutputTokens: 256,
+            responseMimeType: 'application/json',
+          },
+        });
+        content = response.text || '';
+        if (content) break;
+      } catch (err: any) {
+        lastError = err;
+        const status = err?.status ?? err?.statusCode ?? err?.code;
+        if (status === 429 || String(err?.message ?? '').toLowerCase().includes('quota')) {
+          continue;
+        }
+        break;
+      }
+    }
+
+    if (!content) {
+      console.warn('[GeminiAI] Empty response in parseEpisodeWithContext. Returning default.');
+      return { season: null, episode: null };
+    }
+
+    let text = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    const parsed = JSON.parse(text);
+    return {
+      season: typeof parsed.season === 'number' ? parsed.season : null,
+      episode: typeof parsed.episode === 'number' ? parsed.episode : null,
+      episodeName: typeof parsed.episodeName === 'string' && parsed.episodeName.trim() ? parsed.episodeName.trim() : undefined,
+    };
+  } catch (e) {
+    console.error('[GeminiAI] Failed to parse episode with context:', e);
+    return { season: null, episode: null };
+  }
+}
+
+export async function batchParseEpisodesWithContext(
+  filenames: string[],
+  showTitle: string
+): Promise<Record<string, { season: number | null; episode: number | null; episodeName?: string }>> {
+  if (filenames.length === 0) return {};
+  try {
+    const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+    const prompt = `You are a TV episode parser.
+The user has a TV show: "${showTitle}"
+Extract the season number, episode number, and episode title (if present in the filename) for each of these files.
+Do not guess the episode title from external knowledge, only extract it if it's explicitly written in the filename.
+If it's an anime with absolute numbering (e.g. - 14), season is 1, episode is 14.
+Output ONLY valid JSON with no markdown formatting.
+Schema: {"<exact filename>": {"season": number|null, "episode": number|null, "episodeName": string|null}}
+
+Files to parse:
+${JSON.stringify(filenames)}
+`;
+
+    let content = '';
+    let lastError: any = null;
+    for (const model of GEMINI_MODELS) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: {
+            temperature: 0.1,
+            maxOutputTokens: 2048,
+            responseMimeType: 'application/json',
+          },
+        });
+        content = response.text || '';
+        if (content) break;
+      } catch (err: any) {
+        lastError = err;
+        const status = err?.status ?? err?.statusCode ?? err?.code;
+        if (status === 429 || String(err?.message ?? '').toLowerCase().includes('quota')) {
+          continue;
+        }
+        break;
+      }
+    }
+
+    if (!content) {
+      console.warn('[GeminiAI] Empty response in batchParseEpisodesWithContext. Returning empty object.');
+      return {};
+    }
+
+    let text = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    const parsed = JSON.parse(text);
+    
+    const results: Record<string, { season: number | null; episode: number | null; episodeName?: string }> = {};
+    for (const filename of filenames) {
+      const p = parsed[filename];
+      if (p) {
+        results[filename] = {
+          season: typeof p.season === 'number' ? p.season : null,
+          episode: typeof p.episode === 'number' ? p.episode : null,
+          episodeName: typeof p.episodeName === 'string' && p.episodeName.trim() ? p.episodeName.trim() : undefined,
+        };
+      }
+    }
+    return results;
+  } catch (e) {
+    console.error('[GeminiAI] Failed to batch parse episodes with context:', e);
+    return {};
+  }
+}
+
+export async function disambiguateMatch(
+  filename: string,
+  options: { id: string; title: string; year?: string }[],
+  userHint: string
+): Promise<string | null> {
+  if (options.length === 0) return null;
+  try {
+    const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+    const systemPrompt = `You are a TV/Movie matcher helping to resolve an ambiguous file.
+The user will provide a filename, a list of matches, and a hint they provided.
+Based on their hint, identify which ID from the options is the correct match.
+Output ONLY valid JSON with no markdown formatting.
+Schema: {"id": string|null}`;
+
+    const prompt = `Filename: "${filename}"
+Matches:
+${JSON.stringify(options, null, 2)}
+
+User's hint: "${userHint}"`;
+
+    let content = '';
+    let lastError: any = null;
+    for (const model of GEMINI_MODELS) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: {
+            systemInstruction: systemPrompt,
+            temperature: 0.1,
+            maxOutputTokens: 256,
+            responseMimeType: 'application/json',
+          },
+        });
+        content = response.text || '';
+        if (content) break;
+      } catch (err: any) {
+        lastError = err;
+        const status = err?.status ?? err?.statusCode ?? err?.code;
+        if (status === 429 || String(err?.message ?? '').toLowerCase().includes('quota')) {
+          continue;
+        }
+        break;
+      }
+    }
+
+    if (!content) {
+      console.warn('[GeminiAI] Empty response in disambiguateMatch. Returning null.');
+      return null;
+    }
+
+    let text = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    const parsed = JSON.parse(text);
+    if (parsed.id !== undefined && parsed.id !== null) {
+      return String(parsed.id);
+    }
+    return null;
+  } catch (e) {
+    console.error('[GeminiAI] Failed to disambiguate:', e);
+    return null;
+  }
+}
+
 export const geminiAIService = {
   batchParseFilenames,
   parseSingleFilename,
+  parseEpisodeWithContext,
+  batchParseEpisodesWithContext,
+  disambiguateMatch,
 };

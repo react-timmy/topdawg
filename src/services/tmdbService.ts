@@ -322,6 +322,48 @@ export const tmdbService = {
     }
   },
 
+  /**
+   * Resolve an absolute episode number (common in anime/continuous-numbering shows)
+   * to the correct season + relative episode number by walking TMDB seasons.
+   *
+   * e.g. a show with S1=13 eps and S2=12 eps:
+   *   absolute=14 → { season: 2, episode: 1 }
+   *   absolute=1  → { season: 1, episode: 1 } (unchanged)
+   *
+   * Returns null when the show has only one season or the number fits within S1,
+   * so the caller can keep the original values unchanged in those cases.
+   */
+  async resolveAbsoluteEpisode(
+    showId: string,
+    numberOfSeasons: number,
+    absoluteEpisode: number,
+  ): Promise<{ season: number; episode: number } | null> {
+    // If there's only one season, absolute == relative — nothing to resolve.
+    if (numberOfSeasons <= 1) return null;
+
+    try {
+      let remaining = absoluteEpisode;
+
+      for (let s = 1; s <= numberOfSeasons; s++) {
+        const episodes = await tmdbService.getSeasonDetails(showId, s);
+        // Season 0 is "Specials" on TMDB — skip it for absolute counting
+        if (episodes.length === 0) continue;
+
+        if (remaining <= episodes.length) {
+          // Only return a mapping when the answer is actually a different season.
+          if (s === 1) return null;
+          return { season: s, episode: remaining };
+        }
+        remaining -= episodes.length;
+      }
+
+      // Absolute number exceeds all known episodes — can't resolve
+      return null;
+    } catch {
+      return null;
+    }
+  },
+
   /** Details for a single episode */
   async getEpisodeDetails(showId: string, season: number, episode: number): Promise<EpisodeInfo | null> {
     try {

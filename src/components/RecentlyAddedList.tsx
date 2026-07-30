@@ -54,6 +54,7 @@ export function RecentlyAddedList({ items, onDismiss, onRematchSuccess }: Recent
   const [searchType, setSearchType] = useState<"movie" | "tv">("movie");
   const [searchResults, setSearchResults] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState("");
 
   // Auto clean filename for initial search query
   const cleanFilenameForSearch = (filename: string) => {
@@ -71,6 +72,7 @@ export function RecentlyAddedList({ items, onDismiss, onRematchSuccess }: Recent
       setSearchResults([]);
       return;
     }
+    setLoadingMessage("Searching databases, please wait...");
     setLoading(true);
     try {
       const results = await tmdbService.search(query, type);
@@ -91,6 +93,7 @@ export function RecentlyAddedList({ items, onDismiss, onRematchSuccess }: Recent
   useEffect(() => {
     const initSearch = async () => {
       if (selectedOldItem?.localFile) {
+        setLoadingMessage("Analyzing filename with AI...");
         setLoading(true);
         let initialQuery = "";
         try {
@@ -124,49 +127,67 @@ export function RecentlyAddedList({ items, onDismiss, onRematchSuccess }: Recent
     }
   }, [searchType]);
 
-  function parseSeasonEpisode(filename: string): { season: number | null; episode: number | null } {
+  function parseSeasonEpisode(filename: string): { season: number | null; episode: number | null; extractedName?: string } {
     let tempName = filename.replace(/\.[a-zA-Z0-9]+$/, '');
     tempName = tempName.replace(/^\[[^\]]+\]\s*/g, '');
     tempName = tempName.replace(/\s*\[[^\]]+\]/g, '');
     tempName = tempName.replace(/\s*\([^)]+\)/g, '');
     tempName = tempName.replace(/[\._\+]/g, ' ').trim();
 
-    const seMatch = tempName.match(/(.*?)\b[sS]([0-9]{1,2})[eE]([0-9]{1,2})\b/i) || 
-                    tempName.match(/(.*?)\b([0-9]{1,2})x([0-9]{1,2})\b/i);
+    const seMatch = tempName.match(/(.*?)\b[sS]([0-9]{1,2})[eE]([0-9]{1,2})\b(.*)/i) || 
+                    tempName.match(/(.*?)\b([0-9]{1,2})x([0-9]{1,2})\b(.*)/i);
     if (seMatch) {
-      return { season: parseInt(seMatch[2], 10), episode: parseInt(seMatch[3], 10) };
+      let extractedName = seMatch[4]?.replace(/^[-\s]+/, '').trim();
+      return { season: parseInt(seMatch[2], 10), episode: parseInt(seMatch[3], 10), extractedName: extractedName || undefined };
     }
-    const animeMatch = tempName.match(/(.*?)\s*-\s*([0-9]{1,3})\b/);
+    const animeMatch = tempName.match(/(.*?)\s*-\s*([0-9]{1,4})\b(.*)/);
     if (animeMatch) {
-      return { season: 1, episode: parseInt(animeMatch[2], 10) };
+      let extractedName = animeMatch[3]?.replace(/^[-\s]+/, '').trim();
+      return { season: 1, episode: parseInt(animeMatch[2], 10), extractedName: extractedName || undefined };
     }
-    return { season: null, episode: null };
+    return { season: null, episode: null, extractedName: undefined };
   }
 
   const handleMatchSelect = async (item: MediaItem) => {
     if (!selectedOldItem?.localFile) return;
 
+    setLoadingMessage("Parsing match details with AI, please wait...");
     setLoading(true);
     try {
       const details = await tmdbService.getDetails(item.id, item.type);
       
       let localFileWithMeta = { ...selectedOldItem.localFile };
       if (item.type === 'tv') {
-        const parsed = parseSeasonEpisode(selectedOldItem.localFile.filename);
+        let parsed = parseSeasonEpisode(selectedOldItem.localFile.filename);
+        try {
+          const aiParsed = await geminiAIService.parseEpisodeWithContext(selectedOldItem.localFile.filename, item.title);
+          if (aiParsed.season !== null && aiParsed.episode !== null) {
+            parsed = {
+              season: aiParsed.season,
+              episode: aiParsed.episode,
+              extractedName: aiParsed.episodeName || parsed.extractedName,
+            };
+          }
+        } catch (e) {
+          console.warn('Gemini episode parsing failed:', e);
+        }
+
         let episodeName: string | undefined = undefined;
         let stillUrl: string | undefined = undefined;
         if (parsed.season !== null && parsed.episode !== null) {
-          const epDetails = await tmdbService.getEpisodeDetails(item.id, parsed.season, parsed.episode);
-          if (epDetails) {
-            episodeName = epDetails.name;
-            stillUrl = epDetails.stillUrl;
+          if (!item.id.startsWith('anime:')) {
+            const epDetails = await tmdbService.getEpisodeDetails(item.id, parsed.season, parsed.episode);
+            if (epDetails) {
+              episodeName = epDetails.name;
+              stillUrl = epDetails.stillUrl;
+            }
           }
         }
         localFileWithMeta = {
           ...selectedOldItem.localFile,
           seasonNumber: parsed.season ?? 1,
           episodeNumber: parsed.episode ?? 1,
-          episodeName,
+          episodeName: episodeName || parsed.extractedName,
           stillUrl,
         };
       } else {
@@ -192,6 +213,7 @@ export function RecentlyAddedList({ items, onDismiss, onRematchSuccess }: Recent
       Alert.alert("Error", "Failed to retrieve full item metadata.");
     } finally {
       setLoading(false);
+      setLoadingMessage("");
     }
   };
 
@@ -442,6 +464,7 @@ export function RecentlyAddedList({ items, onDismiss, onRematchSuccess }: Recent
           {loading ? (
             <View style={styles.center}>
               <ActivityIndicator size="large" color="#ffffff" />
+              {loadingMessage ? <Text style={{ color: '#a1a1aa', marginTop: 16, fontSize: 13, fontWeight: '600' }}>{loadingMessage}</Text> : null}
             </View>
           ) : (
             <FlatList

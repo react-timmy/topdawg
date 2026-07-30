@@ -97,6 +97,8 @@ function CustomTabBar({ state, navigation }: BottomTabBarProps) {
       <View style={styles.tabBarContainer}>
         {state.routes.map((route, index) => {
           if (!TAB_CONFIG[route.name]) return null;
+          // Profile tab is hidden from the bar but the screen stays registered
+          if (route.name === 'Profile') return null;
 
           const isFocused = state.index === index;
 

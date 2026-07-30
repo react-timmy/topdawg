@@ -5,6 +5,8 @@ import {
   Pressable,
   StyleSheet,
   InteractionManager,
+  Modal,
+  ScrollView,
 } from "react-native";
 import Animated, {
   FadeIn,
@@ -16,9 +18,11 @@ import Animated, {
   withRepeat,
 } from "react-native-reanimated";
 import {
+  AlertTriangle,
   CheckCircle2,
   Clapperboard,
   FilePlus,
+  HelpCircle,
   RotateCcw,
   Scan,
   ShieldAlert,
@@ -180,6 +184,15 @@ export function Scanner({ onScanComplete }: ScannerProps) {
   const cancelRequestedRef = useRef(false);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [cancelCountdown, setCancelCountdown] = useState(10);
+
+  type DisambiguationOption = { title: string; year: string; id: string };
+  type DisambiguationData = {
+    filename: string;
+    title: string;
+    options: DisambiguationOption[];
+    resolve: (id: string | null) => void;
+  };
+  const [disambiguation, setDisambiguation] = useState<DisambiguationData | null>(null);
 
   useEffect(() => {
     const loadSettings = async () => {
@@ -584,6 +597,7 @@ export function Scanner({ onScanComplete }: ScannerProps) {
       const notifiedIds = new Set<string>();
 
       const resolveMetadata = async (
+        filename: string,
         title: string,
         type: "movie" | "tv",
         year: number | null,
@@ -601,11 +615,52 @@ export function Scanner({ onScanComplete }: ScannerProps) {
           return rankSearchResults(results, isAnimeFile)[0];
         };
 
+        /**
+         * Returns true when results contain at least two entries with different
+         * release years AND the filename gave us no year to disambiguate with.
+         * In that case we should ask the user rather than guess.
+         */
+        const needsUserClarification = (results: MediaItem[]) => {
+          if (year !== null || results.length < 2) return false;
+          const years = new Set(
+            results
+              .map((r) => r.releaseDate?.split("-")[0])
+              .filter(Boolean),
+          );
+          return years.size >= 2;
+        };
+
+        const askUser = async (results: MediaItem[]): Promise<string | null> => {
+          return new Promise<string | null>((resolve) => {
+            setDisambiguation({
+              filename,
+              title,
+              options: results.slice(0, 5).map((r) => ({
+                title: r.title,
+                year: r.releaseDate ? r.releaseDate.split("-")[0] : "Unknown",
+                id: r.id,
+              })),
+              resolve,
+            });
+          });
+        };
+
         let results = await tmdbService.search(title, type, year);
         if (results.length === 0 && year) {
           results = await tmdbService.search(title, type);
         }
-        let first = pick(results);
+
+        let first: MediaItem | null = null;
+        if (needsUserClarification(results)) {
+          const chosenId = await askUser(results);
+          setDisambiguation(null);
+          if (chosenId) {
+            first = results.find((r) => String(r.id) === String(chosenId)) ?? null;
+          }
+          if (!first) first = pick(results);
+        } else {
+          first = pick(results);
+        }
 
         if (!first && type === "tv" && isAnimeFile) {
           const animeResults = await animeService.search(title);
@@ -618,7 +673,17 @@ export function Scanner({ onScanComplete }: ScannerProps) {
           if (fallback.length === 0 && year) {
             fallback = await tmdbService.search(title, fallbackType);
           }
-          first = pick(fallback);
+
+          if (needsUserClarification(fallback)) {
+            const chosenId = await askUser(fallback);
+            setDisambiguation(null);
+            if (chosenId) {
+              first = fallback.find((r) => String(r.id) === String(chosenId)) ?? null;
+            }
+            if (!first) first = pick(fallback);
+          } else {
+            first = pick(fallback);
+          }
 
           if (!first && fallbackType === "tv" && isAnimeFile) {
             const animeResults = await animeService.search(title);
@@ -762,7 +827,7 @@ export function Scanner({ onScanComplete }: ScannerProps) {
         try {
           if (title) {
             const isAnimeFile = resolveIsAnime(file.filename, aiParsed?.isAnime);
-            const meta = await resolveMetadata(title, type, year, isAnimeFile);
+            const meta = await resolveMetadata(file.filename, title, type, year, isAnimeFile);
 
             if (meta) {
               let episodeName: string | undefined;
@@ -774,7 +839,31 @@ export function Scanner({ onScanComplete }: ScannerProps) {
                 season !== null &&
                 episode !== null
               ) {
-                const epKey = `${meta.id}|${season}|${episode}`;
+                // ── Absolute episode resolution ──────────────────────────────
+                // Filenames like "ShowName - 14" have no season marker, so
+                // every parser defaults to season=1. If the show has multiple
+                // seasons, episode 14 might actually be S02E01 (or similar).
+                // Walk TMDB seasons to find the real season/episode pair.
+                let resolvedSeason = season;
+                let resolvedEpisode = episode;
+
+                if (season === 1 && (meta.numberOfSeasons ?? 1) > 1) {
+                  const resolved = await tmdbService.resolveAbsoluteEpisode(
+                    meta.id,
+                    meta.numberOfSeasons!,
+                    episode,
+                  );
+                  if (resolved) {
+                    resolvedSeason = resolved.season;
+                    resolvedEpisode = resolved.episode;
+                    console.log(
+                      `[Scanner] Absolute ep ${episode} → S${resolvedSeason}E${resolvedEpisode} for "${meta.title}"`,
+                    );
+                  }
+                }
+                // ─────────────────────────────────────────────────────────────
+
+                const epKey = `${meta.id}|${resolvedSeason}|${resolvedEpisode}`;
                 if (episodeCache.has(epKey)) {
                   const cached = episodeCache.get(epKey)!;
                   episodeName = cached.episodeName;
@@ -782,8 +871,8 @@ export function Scanner({ onScanComplete }: ScannerProps) {
                 } else {
                   const epDetails = await tmdbService.getEpisodeDetails(
                     meta.id,
-                    season,
-                    episode,
+                    resolvedSeason,
+                    resolvedEpisode,
                   );
                   if (epDetails) {
                     episodeName = epDetails.name;
@@ -791,6 +880,11 @@ export function Scanner({ onScanComplete }: ScannerProps) {
                   }
                   episodeCache.set(epKey, { episodeName, stillUrl });
                 }
+
+                // Update season/episode to the resolved values so they're
+                // stored correctly in the library.
+                season = resolvedSeason;
+                episode = resolvedEpisode;
               }
 
               matchedItem = {
@@ -1000,6 +1094,14 @@ export function Scanner({ onScanComplete }: ScannerProps) {
 
             <Text style={styles.heading}>Scanning Files...</Text>
 
+            {/* Stay-on-screen banner */}
+            <View style={styles.stayOnScreenBanner}>
+              <AlertTriangle size={14} color="#fbbf24" strokeWidth={2.5} />
+              <Text style={styles.stayOnScreenText}>
+                Please stay on this screen until scanning is complete
+              </Text>
+            </View>
+
             <View style={styles.progressPanel}>
               <View style={styles.progressHeader}>
                 <Text style={styles.progressTitle} numberOfLines={1}>
@@ -1136,33 +1238,95 @@ export function Scanner({ onScanComplete }: ScannerProps) {
   };
 
   return (
-    <>
-      <View style={styles.card}>
-        {renderContent()}
-        {aiToast ? (
-          <Animated.View
-            entering={FadeIn.duration(160)}
-            exiting={FadeOut.duration(220)}
-            style={styles.aiToast}
-            pointerEvents="none"
-          >
-            <Sparkles size={14} color="#4ade80" strokeWidth={2.2} />
-            <Text style={styles.aiToastText}>{aiToast}</Text>
-          </Animated.View>
-        ) : null}
-      </View>
-      <ProPaywallModal
-        visible={showPaywall}
-        onClose={() => setShowPaywall(false)}
-        onPurchaseSuccess={() => {
-          setShowPaywall(false);
-        }}
-      />
-    </>
+    <View style={styles.container}>
+      {renderContent()}
+
+      {/* Disambiguation Modal — asks user to pick the correct title when year is ambiguous */}
+      {disambiguation && (
+        <Modal transparent animationType="fade" visible={true} statusBarTranslucent>
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              {/* Header */}
+              <View style={styles.modalHeader}>
+                <View style={styles.modalIconWrap}>
+                  <HelpCircle size={22} color="#fbbf24" strokeWidth={2} />
+                </View>
+                <Text style={styles.modalTitle}>Which one is it?</Text>
+              </View>
+
+              {/* Filename chip */}
+              <View style={styles.modalFilenameChip}>
+                <Text style={styles.modalFilenameText} numberOfLines={2}>
+                  {disambiguation.filename}
+                </Text>
+              </View>
+
+              <Text style={styles.modalQuestion}>
+                We found <Text style={styles.modalTitleHighlight}>{disambiguation.title}</Text> with multiple release years. Tap the correct one:
+              </Text>
+
+              {/* Option buttons — one per result */}
+              <ScrollView
+                style={styles.modalOptionsScroll}
+                contentContainerStyle={styles.modalOptionsContainer}
+                showsVerticalScrollIndicator={false}
+              >
+                {disambiguation.options.map((option) => (
+                  <Pressable
+                    key={option.id}
+                    style={({ pressed }) => [
+                      styles.modalOptionBtn,
+                      pressed && styles.modalOptionBtnPressed,
+                    ]}
+                    onPress={() => disambiguation.resolve(option.id)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${option.title} from ${option.year}`}
+                  >
+                    <View style={styles.modalOptionInner}>
+                      <Text style={styles.modalOptionTitle} numberOfLines={1}>
+                        {option.title}
+                      </Text>
+                      <View style={styles.modalOptionYearBadge}>
+                        <Text style={styles.modalOptionYearText}>{option.year}</Text>
+                      </View>
+                    </View>
+                  </Pressable>
+                ))}
+              </ScrollView>
+
+              {/* Skip — AI picks the best guess */}
+              <Pressable
+                style={styles.modalSkipBtn}
+                onPress={() => disambiguation.resolve(null)}
+                accessibilityRole="button"
+                accessibilityLabel="Skip and let AI decide"
+              >
+                <Text style={styles.modalSkipText}>Not sure — let AI decide</Text>
+              </Pressable>
+            </View>
+          </View>
+        </Modal>
+      )}
+
+      {aiToast ? (
+        <Animated.View
+          entering={FadeIn.duration(160)}
+          exiting={FadeOut.duration(220)}
+          style={styles.aiToast}
+          pointerEvents="none"
+        >
+          <Sparkles size={14} color="#4ade80" strokeWidth={2.2} />
+          <Text style={styles.aiToastText}>{aiToast}</Text>
+        </Animated.View>
+      ) : null}
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  container: {
+    width: "100%",
+  },
   card: {
     width: "100%",
     backgroundColor: "#18181b",
@@ -1221,6 +1385,28 @@ const styles = StyleSheet.create({
     textAlign: "center",
     paddingHorizontal: 4,
   },
+  // ── Stay-on-screen banner ──────────────────────────────────────────────────
+  stayOnScreenBanner: {
+    width: "100%",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: "rgba(251,191,36,0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(251,191,36,0.3)",
+  },
+  stayOnScreenText: {
+    color: "#fbbf24",
+    fontSize: 12,
+    fontWeight: "700",
+    flex: 1,
+    flexWrap: "wrap",
+  },
+  // ─────────────────────────────────────────────────────────────────────────
   btnRow: {
     flexDirection: "row",
     width: "100%",
@@ -1269,7 +1455,6 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     textAlign: "center",
   },
-  // AI sparkles icon toggle (top-right of idle header)
   aiIconBtn: {
     position: "absolute",
     top: 0,
@@ -1473,5 +1658,124 @@ const styles = StyleSheet.create({
     color: "#f87171",
     fontSize: 13,
     fontWeight: "700",
+  },
+  // ── Disambiguation modal ───────────────────────────────────────────────────
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.88)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 20,
+  },
+  modalContent: {
+    backgroundColor: "#18181b",
+    borderRadius: 20,
+    padding: 24,
+    width: "100%",
+    maxWidth: 420,
+    borderWidth: 1,
+    borderColor: "#27272a",
+    gap: 16,
+  },
+  modalHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  modalIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: "rgba(251,191,36,0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(251,191,36,0.3)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  modalTitle: {
+    color: "#ffffff",
+    fontSize: 18,
+    fontWeight: "800",
+  },
+  modalFilenameChip: {
+    backgroundColor: "rgba(255,255,255,0.05)",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  modalFilenameText: {
+    color: "#71717a",
+    fontSize: 11,
+    fontWeight: "600",
+    fontFamily: "monospace" as any,
+  },
+  modalQuestion: {
+    color: "#a1a1aa",
+    fontSize: 14,
+    lineHeight: 21,
+  },
+  modalTitleHighlight: {
+    color: "#ffffff",
+    fontWeight: "700",
+  },
+  modalOptionsScroll: {
+    maxHeight: 260,
+  },
+  modalOptionsContainer: {
+    gap: 8,
+  },
+  modalOptionBtn: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+    backgroundColor: "rgba(255,255,255,0.05)",
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+  },
+  modalOptionBtnPressed: {
+    backgroundColor: "rgba(96,165,250,0.15)",
+    borderColor: "rgba(96,165,250,0.5)",
+  },
+  modalOptionInner: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  modalOptionTitle: {
+    color: "#ffffff",
+    fontSize: 15,
+    fontWeight: "700",
+    flex: 1,
+  },
+  modalOptionYearBadge: {
+    backgroundColor: "rgba(96,165,250,0.18)",
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: "rgba(96,165,250,0.35)",
+  },
+  modalOptionYearText: {
+    color: "#60a5fa",
+    fontSize: 13,
+    fontWeight: "800",
+    fontVariant: ["tabular-nums"],
+  },
+  modalSkipBtn: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: "rgba(255,255,255,0.04)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+  },
+  modalSkipText: {
+    color: "#71717a",
+    fontSize: 13,
+    fontWeight: "600",
   },
 });

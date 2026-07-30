@@ -9,7 +9,8 @@
       "distribution": "internal",
       "android": {
         "buildType": "apk"
-      }
+      },
+      "channel": "development"
     },
     "preview": {
       "distribution": "internal",
@@ -20,7 +21,8 @@
         "EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID": "442264227434-vvga9qod8e7fah0mndqi83kljrd0p1nb.apps.googleusercontent.com",
         "EXPO_PUBLIC_FIREBASE_PROJECT_ID": "filmoor-49db3",
         "EXPO_PUBLIC_ENABLE_CLOUD_SYNC": "true"
-      }
+      },
+      "channel": "preview"
     },
     "production": {
       "autoIncrement": true,
@@ -28,7 +30,8 @@
         "EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID": "442264227434-vvga9qod8e7fah0mndqi83kljrd0p1nb.apps.googleusercontent.com",
         "EXPO_PUBLIC_FIREBASE_PROJECT_ID": "filmoor-49db3",
         "EXPO_PUBLIC_ENABLE_CLOUD_SYNC": "true"
-      }
+      },
+      "channel": "production"
     }
   },
   "submit": {
