@@ -204,13 +204,14 @@ const styles = StyleSheet.create({
   // Sticky bottom panel
   stickyBottom: {
     paddingHorizontal: 24,
+    paddingTop: 16,
     paddingBottom: 8,
     backgroundColor: '#000000',
   },
   stickyDivider: {
     height: 1,
     backgroundColor: 'rgba(255,255,255,0.07)',
-    marginBottom: 20,
+    marginBottom: 28,
   },
 
   // Hero

@@ -263,9 +263,13 @@ export function VideoPlayerScreen() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [showControls, setShowControls] = useState(false);
+  const showControlsRef = useRef(false); // mirror — always fresh, safe inside stale callbacks
   const [locked, setLocked] = useState(false);
   const lockedRef = useRef(false); // mirror for use inside gesture callbacks
   const [showLockHint, setShowLockHint] = useState(false);
+
+  // Sync showControlsRef whenever showControls changes
+  useEffect(() => { showControlsRef.current = showControls; }, [showControls]);
   const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
   const [muted, setMuted] = useState(false);
   const [isSeeking, setIsSeeking] = useState(false);
@@ -383,15 +387,19 @@ export function VideoPlayerScreen() {
   }, [setSystemUiImmersive]);
 
   // ── FIX: subscribe to player status → play as soon as video is ready ──────
+  // Track whether the episode was requested to auto-play (set by playEpisode).
+  // Declared here so it's available inside the statusChange listener below.
+  const autoPlayNextEp = useRef(false);
   useEffect(() => {
     if (!player) return;
     const sub = player.addListener('statusChange', ({ status }) => {
       if (status === 'readyToPlay') {
-        // Only auto-play if we haven't manually paused
-        if (!isPlaying) {
-          player.play();
-          setIsPlaying(true);
-        }
+        // Play if: this is the initial load (isPlaying starts false but we want autoplay),
+        // OR the user switched episodes with auto-play intent.
+        // We always auto-play on first ready — user can pause immediately if they prefer.
+        player.play();
+        setIsPlaying(true);
+        autoPlayNextEp.current = false;
       }
     });
     return () => sub.remove();
@@ -425,6 +433,9 @@ export function VideoPlayerScreen() {
     if (!sourceReady.current) { sourceReady.current = true; return; }
     (async () => {
       try {
+        // Capture the auto-play intent before we reset state
+        const shouldPlay = isPlaying; // isPlaying was set to true by playEpisode
+        autoPlayNextEp.current = shouldPlay;
         didSeekToStart.current = true;
         startPositionRef.current = 0;
         if (activeFile) {
@@ -435,8 +446,8 @@ export function VideoPlayerScreen() {
           }
         }
         await player.replaceAsync(uri);
-        // statusChange listener will call play() when readyToPlay fires
-        setIsPlaying(false);
+        // statusChange → readyToPlay will call play() when autoPlayNextEp is true.
+        // Reset UI state while we wait for the new source to be ready.
         setCurrentTime(0);
         setShowNextUp(false);
         sliderMaxRef.current = 0;
@@ -597,11 +608,16 @@ export function VideoPlayerScreen() {
     player.currentTime = next;
     setCurrentTime(next);
     teleportSlider(next);
-    // Restore play state — some expo-video versions internally pause on currentTime assignment
+    // Restore play state — some expo-video versions internally pause on currentTime assignment.
+    // Do NOT call setIsPlaying here — play state hasn't changed, we're just seeking.
     if (wasPlaying) {
       player.play();
     }
-    revealControls();
+    // Only show controls if they are already visible — skip should never pop controls
+    // open when the user has tapped them away (fixes double-tap revealing controls).
+    if (showControlsRef.current) {
+      scheduleHide();
+    }
   };
 
   const hideGestureHudSoon = useCallback(() => {
@@ -734,6 +750,10 @@ export function VideoPlayerScreen() {
     }));
     setEpisodesOpen(false);
     setShowNextUp(false);
+    // Always auto-play when the user explicitly picks an episode (or next-episode fires).
+    // The statusChange → readyToPlay listener will call player.play(), but we also mark
+    // isPlaying true now so the UI reflects intent immediately.
+    setIsPlaying(true);
   };
 
   const handleNextEpisode = () => { if (nextEpisode) playEpisode(nextEpisode); };
