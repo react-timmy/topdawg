@@ -130,7 +130,7 @@ export function ScannerScreen() {
   // ── Consent gate handlers ─────────────────────────────────────────────────
 
   const handleConsentAccepted = useCallback(() => {
-    // saveConsent() was already called inside LegalConsentGate before this fires
+    // LegalConsentGate already saved consent — unhide the scanner immediately.
     setConsentRequired(false);
   }, []);
 
@@ -140,7 +140,7 @@ export function ScannerScreen() {
     setConsentRequired(true);
   }, []);
 
-  // Still loading consent state — render nothing to avoid flash
+  // Still loading consent state — keep background, avoid blank “loading forever” feel
   if (consentRequired === null) {
     return <View style={styles.container} />;
   }
@@ -148,8 +148,8 @@ export function ScannerScreen() {
   return (
     <View style={styles.container}>
       <FloatingHeader
-        title="Scanner"
-        subtitle="Scan local video files"
+        title="Scan"
+        subtitle="Find your videos"
         onHeightChange={setHeaderHeight}
         onSettingsPress={() => navigation.navigate('Settings')}
       />

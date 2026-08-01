@@ -20,7 +20,6 @@ import { LinearGradient } from 'expo-linear-gradient';
 import {
   ChevronLeft,
   Star,
-  Calendar,
   Clock,
   Play,
   Globe,
@@ -53,6 +52,8 @@ import { geminiAIService } from '../services/geminiAIService';
 import { watchProgressService } from '../storage/watchProgressService';
 import { watchHistoryService } from '../storage/watchHistoryService';
 import { useBadgeUnlock } from '../context/BadgeUnlockContext';
+import { usePro } from '../context/ProContext';
+import { fileLabel } from '../services/fileOrganizeService';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const BACKDROP_HEIGHT = SCREEN_HEIGHT * 0.42;
@@ -217,6 +218,7 @@ export function DetailsScreen() {
   const [selectedSeason, setSelectedSeason] = useState(1);
   const [trailerUrl, setTrailerUrl] = useState<string | null>(null);
   const { checkForNewBadges } = useBadgeUnlock();
+  const { isPro } = usePro();
 
   const [showMatchModal, setShowMatchModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -304,7 +306,11 @@ export function DetailsScreen() {
         const filenames = allFiles.map(f => f.filename);
         let aiParsedEpisodes: Record<string, any> = {};
         try {
-          aiParsedEpisodes = await geminiAIService.batchParseEpisodesWithContext(filenames, selectedItem.title);
+          aiParsedEpisodes = await geminiAIService.batchParseEpisodesWithContext(
+            filenames,
+            selectedItem.title,
+            { isPro },
+          );
         } catch (e) {
           console.warn('Gemini batch episode parsing failed:', e);
         }
@@ -1090,7 +1096,7 @@ export function DetailsScreen() {
               <View style={styles.modalSubtitleBlock}>
                 <Text style={styles.modalSubLabel}>File to match:</Text>
                 <Text style={styles.modalSubtitle} numberOfLines={2}>
-                  {activeFile.filename}
+                  {fileLabel(activeFile)}
                 </Text>
               </View>
             ) : null;

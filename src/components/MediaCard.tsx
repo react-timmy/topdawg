@@ -1,6 +1,6 @@
 import React, { useCallback, useState } from "react";
 import { View, Image, Text, Pressable, StyleSheet } from "react-native";
-import Animated, { FadeIn, FadeInDown } from "react-native-reanimated";
+import Animated, { FadeIn, FadeInDown, Layout } from "react-native-reanimated";
 import { LinearGradient } from "expo-linear-gradient";
 import { BlurView } from "expo-blur";
 import { Star, Calendar, Play, Info, Clock } from "lucide-react-native";
@@ -80,6 +80,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({ item, index = 0 }) => {
   return (
     <Animated.View
       entering={FadeInDown.delay(index * 80).duration(500).springify()}
+      layout={Layout.springify().duration(400)}
       style={styles.card}
     >
       <Pressable onPress={handleDetails} style={StyleSheet.absoluteFillObject} />
@@ -220,7 +221,7 @@ const styles = StyleSheet.create({
 
   posterOverlay: {
     position: "absolute",
-    top: 15,
+    top: 18,
     right: 0,
     width: "34%",
     aspectRatio: 3 / 4.25,

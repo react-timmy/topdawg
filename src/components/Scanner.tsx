@@ -6,7 +6,11 @@ import {
   StyleSheet,
   InteractionManager,
   Modal,
-  ScrollView,
+  FlatList,
+  Image,
+  AppState,
+  Linking,
+  type AppStateStatus,
 } from "react-native";
 import Animated, {
   FadeIn,
@@ -22,6 +26,8 @@ import {
   CheckCircle2,
   Clapperboard,
   FilePlus,
+  FileVideo2,
+  Film,
   HelpCircle,
   RotateCcw,
   Scan,
@@ -29,6 +35,7 @@ import {
   Sparkles,
   Zap,
 } from "lucide-react-native";
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as DocumentPicker from "expo-document-picker";
 import * as MediaLibrary from "expo-media-library";
 import { filenameParse } from "@ctrl/video-filename-parser";
@@ -44,7 +51,6 @@ import { rankSearchResults, resolveIsAnime } from "../utils/mediaHints";
 import { parseLocalFilename } from "../utils/localFilenameParser";
 import { usePro } from "../context/ProContext";
 import { incrementScansUsed } from "../storage/proStatusService";
-import { ProPaywallModal } from "./ProPaywallModal";
 
 type ScanState = "idle" | "scanning" | "complete" | "permission_denied" | "error";
 
@@ -53,6 +59,34 @@ export interface ScannerProps {
 }
 
 const AI_ENABLED_STORAGE_KEY = "@cinescan:ai_parsing_enabled";
+
+/** Match app.config.js expo-media-library granularPermissions: video only. */
+const VIDEO_GRANULAR: MediaLibrary.GranularPermission[] = ["video"];
+
+/**
+ * Ask for video library access. Re-shows the system sheet while canAskAgain;
+ * when the OS has permanently denied, returns canAskAgain:false so the UI can
+ * deep-link to Settings (requestPermissionsAsync alone would silently fail).
+ */
+async function requestVideoLibraryAccess(): Promise<{
+  granted: boolean;
+  canAskAgain: boolean;
+}> {
+  const current = await MediaLibrary.getPermissionsAsync(false, VIDEO_GRANULAR);
+  if (current.granted) {
+    return { granted: true, canAskAgain: true };
+  }
+
+  // Still allowed to show the system permission dialog — request again even if
+  // the user dismissed/denied earlier without a permanent block.
+  if (current.canAskAgain) {
+    const req = await MediaLibrary.requestPermissionsAsync(false, VIDEO_GRANULAR);
+    return { granted: !!req.granted, canAskAgain: req.canAskAgain !== false };
+  }
+
+  // Permanently denied / "Don't ask again" — only Settings can re-enable.
+  return { granted: false, canAskAgain: false };
+}
 
 /**
  * Skip only junk / status clips. Was 20 minutes — that dropped most TV episodes
@@ -87,17 +121,24 @@ const INITIAL_SCAN_PROGRESS: MediaScanProgress = {
 
 function getPhaseLabel(progress: MediaScanProgress): string {
   const phase = progress.phase ?? "";
-  if (phase === "preparing") return "Preparing permissions";
-  if (phase === "selecting") return "Waiting for file selection";
-  if (phase === "loading_library") return "Reading media library";
-  if (phase === "saving") return "Saving library updates";
-  if (phase === "complete") return "Scan complete";
-  if (phase.startsWith("Cancel") || phase.startsWith("Saving partial")) return phase;
-  if (phase.startsWith("AI")) return phase;
+  if (phase === "preparing") return "Starting";
+  if (phase === "selecting") return "Picking";
+  if (phase === "loading_library") return "Reading";
+  if (phase === "saving") return "Saving";
+  if (phase === "complete") return "Done";
+  if (phase.startsWith("Cancel")) return "Stopping";
+  if (phase.startsWith("Saving partial")) return "Saving";
+  // Prefer short labels over raw pipeline messages
+  if (/queue|High traffic/i.test(phase)) return "Waiting";
+  if (/cache|Cache/i.test(phase)) return "Cache";
+  if (/[Ll]ocal/i.test(phase)) return "Offline";
+  if (/[Gg]emini|[Aa]I|Sending|Waiting for Gemini|Got AI/i.test(phase)) return "AI";
+  if (/[Mm]atch/i.test(phase)) return "Matching";
+  if (/[Pp]ars/i.test(phase)) return "Parsing";
   if (progress.total && progress.total > 0) {
-    return `Processing ${progress.processed ?? 0} of ${progress.total} files`;
+    return `${progress.processed ?? 0}/${progress.total}`;
   }
-  return "Preparing files";
+  return "Working";
 }
 
 /** Visible only while countdown > 0, then unmounts (display none). */
@@ -110,7 +151,7 @@ function CancelButton({ countdown, onCancel }: { countdown: number; onCancel: ()
       accessibilityRole="button"
       accessibilityLabel={`Cancel scan, ${countdown} seconds remaining`}
     >
-      <Text style={styles.cancelBtnText}>Cancel Scan · {countdown}s</Text>
+      <Text style={styles.cancelBtnText}>Cancel · {countdown}s</Text>
     </Pressable>
   );
 }
@@ -152,6 +193,8 @@ async function fetchAllVideoFiles(): Promise<LocalFile[]> {
       files.push({
         uri: asset.uri,
         filename: asset.filename || `video_${asset.id}.mp4`,
+        // Needed later for export: open local file without MediaDocumentsProvider denial
+        mediaAssetId: asset.id,
         // expo-media-library duration is in seconds
         duration: typeof asset.duration === "number" ? asset.duration : undefined,
       });
@@ -177,15 +220,19 @@ export function Scanner({ onScanComplete }: ScannerProps) {
   const [aiEnabled, setAiEnabled] = useState(true);
   const [hasScanned, setHasScanned] = useState(false);
   const [aiToast, setAiToast] = useState<string | null>(null);
+  /** False when OS won't show the permission sheet again — open Settings instead. */
+  const [permissionCanAskAgain, setPermissionCanAskAgain] = useState(true);
   const { addNotification } = useNotifications();
   const { isPro, scansRemaining, refreshPro } = usePro();
-  const [showPaywall, setShowPaywall] = useState(false);
+  const insets = useSafeAreaInsets();
   const scanningRef = useRef(false);
   const cancelRequestedRef = useRef(false);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scanStateRef = useRef<ScanState>("idle");
+  const handleScanLibraryRef = useRef<() => Promise<void>>(async () => {});
   const [cancelCountdown, setCancelCountdown] = useState(10);
 
-  type DisambiguationOption = { title: string; year: string; id: string };
+  type DisambiguationOption = { title: string; year: string; id: string; posterUrl?: string };
   type DisambiguationData = {
     filename: string;
     title: string;
@@ -193,6 +240,10 @@ export function Scanner({ onScanComplete }: ScannerProps) {
     resolve: (id: string | null) => void;
   };
   const [disambiguation, setDisambiguation] = useState<DisambiguationData | null>(null);
+
+  useEffect(() => {
+    scanStateRef.current = scanState;
+  }, [scanState]);
 
   useEffect(() => {
     const loadSettings = async () => {
@@ -207,6 +258,33 @@ export function Scanner({ onScanComplete }: ScannerProps) {
     return () => {
       if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     };
+  }, []);
+
+  // After returning from Settings (or any resume), if we're on the no-access
+  // screen and permission is now granted, continue the library scan.
+  useEffect(() => {
+    const onAppStateChange = (next: AppStateStatus) => {
+      if (next !== "active") return;
+      if (scanStateRef.current !== "permission_denied") return;
+      if (scanningRef.current) return;
+
+      void (async () => {
+        try {
+          const perm = await MediaLibrary.getPermissionsAsync(false, VIDEO_GRANULAR);
+          if (perm.granted) {
+            setPermissionCanAskAgain(true);
+            await handleScanLibraryRef.current();
+            return;
+          }
+          setPermissionCanAskAgain(perm.canAskAgain !== false);
+        } catch {
+          /* ignore */
+        }
+      })();
+    };
+
+    const sub = AppState.addEventListener("change", onAppStateChange);
+    return () => sub.remove();
   }, []);
 
   // While scanning: 10s window where Cancel is visible, then hide (countdown → 0).
@@ -242,7 +320,7 @@ export function Scanner({ onScanComplete }: ScannerProps) {
     const nextVal = !aiEnabled;
     setAiEnabled(nextVal);
     showAiToast(
-      nextVal ? "AI filename parsing is ON" : "AI filename parsing is OFF",
+      nextVal ? "AI on" : "AI off",
     );
     try {
       await AsyncStorage.setItem(AI_ENABLED_STORAGE_KEY, nextVal ? "true" : "false");
@@ -305,17 +383,21 @@ export function Scanner({ onScanComplete }: ScannerProps) {
 
       // Permission sheet also backgrounds the app — same picker flag.
       (globalThis as any).__setPickerActive?.(true);
-      let status: MediaLibrary.PermissionStatus;
+      let granted = false;
+      let canAskAgain = true;
       try {
-        const perm = await MediaLibrary.requestPermissionsAsync();
-        status = perm.status;
+        const result = await requestVideoLibraryAccess();
+        granted = result.granted;
+        canAskAgain = result.canAskAgain;
       } finally {
         (globalThis as any).__setPickerActive?.(false);
       }
-      if (status !== "granted") {
+      if (!granted) {
+        setPermissionCanAskAgain(canAskAgain);
         setScanState("permission_denied");
         return;
       }
+      setPermissionCanAskAgain(true);
 
       setProgress((prev) => ({ ...prev, phase: "loading_library" }));
       const files = await fetchAllVideoFiles();
@@ -346,6 +428,47 @@ export function Scanner({ onScanComplete }: ScannerProps) {
     }
   };
 
+  /**
+   * No-access "Allow" CTA: always try the system permission sheet again.
+   * If the OS blocked re-prompts (user never gets a second dialog), open Settings
+   * so they can turn video access on — don't silently re-deny.
+   */
+  const handleAllowPermission = async () => {
+    if (scanningRef.current) return;
+
+    // Fresh check — canAskAgain may have changed after a prior denial.
+    let current: MediaLibrary.PermissionResponse;
+    try {
+      current = await MediaLibrary.getPermissionsAsync(false, VIDEO_GRANULAR);
+    } catch (e) {
+      console.error("[Scanner] getPermissionsAsync failed:", e);
+      setScanState("permission_denied");
+      return;
+    }
+
+    if (current.granted) {
+      await handleScanLibrary();
+      return;
+    }
+
+    if (current.canAskAgain) {
+      // Re-show the system allow/deny sheet (user may have denied without
+      // permanently blocking — request again, don't just stay denied).
+      await handleScanLibrary();
+      return;
+    }
+
+    // OS will not show the dialog again — send them to app Settings.
+    setPermissionCanAskAgain(false);
+    try {
+      await Linking.openSettings();
+    } catch (e) {
+      console.error("[Scanner] openSettings failed:", e);
+    }
+  };
+
+  handleScanLibraryRef.current = handleScanLibrary;
+
   const runScan = async (files: LocalFile[]) => {
     if (scanningRef.current) {
       console.warn("[Scanner] Scan already in progress, ignoring");
@@ -358,9 +481,7 @@ export function Scanner({ onScanComplete }: ScannerProps) {
     const matchedItems: MediaItem[] = [];
     const unmatchedFiles: LocalFile[] = [];
     // Defer inbox spam until the end so we don't re-render the whole app per file
-    const pendingNotifications: Array<
-      Parameters<typeof addNotification>[0]
-    > = [];
+    const pendingNotifications: Parameters<typeof addNotification>[0][] = [];
 
     try {
       setScanState("scanning");
@@ -514,6 +635,7 @@ export function Scanner({ onScanComplete }: ScannerProps) {
             {
               allowGemini,
               maxAiFiles: isPro ? undefined : Math.max(0, scansRemaining),
+              isPro,
             },
           );
           // If user cancelled mid-AI wait, drop results and finish early
@@ -639,6 +761,7 @@ export function Scanner({ onScanComplete }: ScannerProps) {
                 title: r.title,
                 year: r.releaseDate ? r.releaseDate.split("-")[0] : "Unknown",
                 id: r.id,
+                posterUrl: r.posterUrl,
               })),
               resolve,
             });
@@ -1013,7 +1136,7 @@ export function Scanner({ onScanComplete }: ScannerProps) {
                 hitSlop={10}
                 accessibilityRole="switch"
                 accessibilityState={{ checked: aiEnabled }}
-                accessibilityLabel="AI filename parsing"
+                accessibilityLabel="AI"
                 style={({ pressed }) => [
                   styles.aiIconBtn,
                   aiEnabled && styles.aiIconBtnOn,
@@ -1028,15 +1151,13 @@ export function Scanner({ onScanComplete }: ScannerProps) {
               </Pressable>
             </View>
 
-            <Text style={styles.heading}>Scan Media</Text>
-            <Text style={styles.subtext}>
-              Match local videos with rich metadata automatically.
-            </Text>
+            <Text style={styles.heading}>Scan</Text>
+            <Text style={styles.subtext}>Add videos to your library.</Text>
 
             {hasScanned && (
               <View style={styles.lastScanSummary}>
                 <Text style={styles.lastScanText}>
-                  Last: {progress.scanned} scanned · {progress.matched} matched · {progress.skipped} skipped
+                  Last · {progress.scanned} found · {progress.matched} added · {progress.skipped} skip
                 </Text>
               </View>
             )}
@@ -1052,8 +1173,8 @@ export function Scanner({ onScanComplete }: ScannerProps) {
                 onPress={handleSelectFiles}
               >
                 <FilePlus size={16} color="#000000" />
-                <Text style={styles.primaryBtnText} numberOfLines={2}>
-                  Select Files
+                <Text style={styles.primaryBtnText} numberOfLines={1}>
+                  Files
                 </Text>
               </Pressable>
 
@@ -1066,17 +1187,15 @@ export function Scanner({ onScanComplete }: ScannerProps) {
                 onPress={handleScanLibrary}
               >
                 <Scan size={15} color="#ffffff" />
-                <Text style={styles.secondaryBtnText} numberOfLines={2}>
-                  Scan Library
+                <Text style={styles.secondaryBtnText} numberOfLines={1}>
+                  Library
                 </Text>
               </Pressable>
             </View>
 
             <View style={styles.scanningTips}>
               <Zap size={13} color="#71717a" />
-              <Text style={styles.tipText}>
-                Tip: clear filenames match best.
-              </Text>
+              <Text style={styles.tipText}>Clean names work best.</Text>
             </View>
           </View>
         );
@@ -1092,14 +1211,12 @@ export function Scanner({ onScanComplete }: ScannerProps) {
               <Zap size={36} color="#60a5fa" />
             </View>
 
-            <Text style={styles.heading}>Scanning Files...</Text>
+            <Text style={styles.heading}>Scanning</Text>
 
             {/* Stay-on-screen banner */}
             <View style={styles.stayOnScreenBanner}>
               <AlertTriangle size={14} color="#fbbf24" strokeWidth={2.5} />
-              <Text style={styles.stayOnScreenText}>
-                Please stay on this screen until scanning is complete
-              </Text>
+              <Text style={styles.stayOnScreenText}>Stay here until done</Text>
             </View>
 
             <View style={styles.progressPanel}>
@@ -1125,7 +1242,7 @@ export function Scanner({ onScanComplete }: ScannerProps) {
 
               {progress.currentFile ? (
                 <Text style={styles.currentFile} numberOfLines={1}>
-                  File: {progress.currentFile}
+                  {progress.currentFile}
                 </Text>
               ) : null}
             </View>
@@ -1133,22 +1250,22 @@ export function Scanner({ onScanComplete }: ScannerProps) {
             <View style={styles.scanStatsGrid}>
               <View style={styles.scanStatCard}>
                 <CountUpText target={progress.scanned ?? 0} />
-                <Text style={styles.scanStatLabel}>Scanned</Text>
+                <Text style={styles.scanStatLabel}>Found</Text>
               </View>
               <View style={styles.scanStatCard}>
                 <CountUpText target={progress.matched ?? 0} />
-                <Text style={styles.scanStatLabel}>Matched</Text>
+                <Text style={styles.scanStatLabel}>Added</Text>
               </View>
               <View style={styles.scanStatCard}>
                 <CountUpText target={progress.skipped ?? 0} />
-                <Text style={styles.scanStatLabel}>Skipped</Text>
+                <Text style={styles.scanStatLabel}>Skip</Text>
               </View>
             </View>
 
             {aiEnabled ? (
-              <BlinkingText text="Gemini AI analyzing filenames..." />
+              <BlinkingText text="AI working…" />
             ) : (
-              <BlinkingText text="Identifying titles using TMDB..." />
+              <BlinkingText text="Matching…" />
             )}
 
             <CancelButton
@@ -1166,31 +1283,29 @@ export function Scanner({ onScanComplete }: ScannerProps) {
               <CheckCircle2 size={36} color="#4ade80" />
             </View>
 
-            <Text style={styles.heading}>Scan Complete</Text>
-            <Text style={styles.subtext}>
-              All files processed. Rich metadata has been synchronized with your library database.
-            </Text>
+            <Text style={styles.heading}>Done</Text>
+            <Text style={styles.subtext}>Videos are in your library.</Text>
 
             <View style={styles.statsRow}>
               <View style={styles.statItem}>
                 <Text style={styles.statNumber}>{progress.scanned ?? 0}</Text>
-                <Text style={styles.statLabel}>Total</Text>
+                <Text style={styles.statLabel}>Found</Text>
               </View>
               <View style={styles.statDivider} />
               <View style={styles.statItem}>
                 <Text style={styles.statNumber}>{progress.matched ?? 0}</Text>
-                <Text style={styles.statLabel}>Matched</Text>
+                <Text style={styles.statLabel}>Added</Text>
               </View>
               <View style={styles.statDivider} />
               <View style={styles.statItem}>
                 <Text style={styles.statNumber}>{progress.skipped ?? 0}</Text>
-                <Text style={styles.statLabel}>Skipped</Text>
+                <Text style={styles.statLabel}>Skip</Text>
               </View>
             </View>
 
             <Pressable style={[styles.primaryBtn, styles.fullBtn]} onPress={() => setScanState("idle")}>
               <RotateCcw size={18} color="#000000" />
-              <Text style={styles.primaryBtnText}>Scan Again</Text>
+              <Text style={styles.primaryBtnText}>Again</Text>
             </Pressable>
           </View>
         );
@@ -1201,14 +1316,21 @@ export function Scanner({ onScanComplete }: ScannerProps) {
             <View style={[styles.iconRing, styles.iconRingError]}>
               <ShieldAlert size={36} color="#f87171" />
             </View>
-            <Text style={styles.heading}>Permission Denied</Text>
+            <Text style={styles.heading}>No access</Text>
             <Text style={styles.subtext}>
-              CineScan requires media library permissions to access video files stored on this device.
+              {permissionCanAskAgain
+                ? "Allow video access to scan."
+                : "Video access is blocked. Enable it in Settings, then return here."}
             </Text>
 
-            <Pressable style={[styles.primaryBtn, styles.fullBtn]} onPress={handleScanLibrary}>
+            <Pressable
+              style={[styles.primaryBtn, styles.fullBtn]}
+              onPress={handleAllowPermission}
+            >
               <RotateCcw size={18} color="#000000" />
-              <Text style={styles.primaryBtnText}>Grant Permission & Retry</Text>
+              <Text style={styles.primaryBtnText}>
+                {permissionCanAskAgain ? "Allow" : "Open Settings"}
+              </Text>
             </Pressable>
 
             <Pressable style={[styles.secondaryBtn, styles.fullBtn]} onPress={() => setScanState("idle")}>
@@ -1223,14 +1345,12 @@ export function Scanner({ onScanComplete }: ScannerProps) {
             <View style={[styles.iconRing, styles.iconRingError]}>
               <ShieldAlert size={36} color="#f87171" />
             </View>
-            <Text style={styles.heading}>Scan Failed</Text>
-            <Text style={styles.subtext}>
-              An unexpected error occurred while locating or parsing files on your device storage.
-            </Text>
+            <Text style={styles.heading}>Failed</Text>
+            <Text style={styles.subtext}>Something went wrong. Try again.</Text>
 
             <Pressable style={[styles.primaryBtn, styles.fullBtn]} onPress={() => setScanState("idle")}>
               <RotateCcw size={18} color="#000000" />
-              <Text style={styles.primaryBtnText}>Try Again</Text>
+              <Text style={styles.primaryBtnText}>Retry</Text>
             </Pressable>
           </View>
         );
@@ -1241,72 +1361,111 @@ export function Scanner({ onScanComplete }: ScannerProps) {
     <View style={styles.container}>
       {renderContent()}
 
-      {/* Disambiguation Modal — asks user to pick the correct title when year is ambiguous */}
-      {disambiguation && (
-        <Modal transparent animationType="fade" visible={true} statusBarTranslucent>
-          <View style={styles.modalOverlay}>
-            <View style={styles.modalContent}>
-              {/* Header */}
-              <View style={styles.modalHeader}>
-                <View style={styles.modalIconWrap}>
-                  <HelpCircle size={22} color="#fbbf24" strokeWidth={2} />
-                </View>
-                <Text style={styles.modalTitle}>Which one is it?</Text>
-              </View>
+      {/* Disambiguation Modal — bottom-sheet poster-card picker */}
+      <Modal
+        transparent
+        animationType="slide"
+        visible={disambiguation !== null}
+        statusBarTranslucent
+        onRequestClose={() => {
+          if (disambiguation) {
+            const r = disambiguation.resolve;
+            setDisambiguation(null);
+            r(null);
+          }
+        }}
+      >
+        <View style={styles.disambigOverlay}>
+          <View style={[styles.disambigSheet, { paddingBottom: insets.bottom + 20 }]}>
+            {/* Drag handle */}
+            <View style={styles.disambigHandle} />
 
-              {/* Filename chip */}
-              <View style={styles.modalFilenameChip}>
-                <Text style={styles.modalFilenameText} numberOfLines={2}>
+            {/* Header */}
+            <View style={styles.disambigHeader}>
+              <View style={styles.disambigIconWrap}>
+                <HelpCircle size={22} color="#fbbf24" strokeWidth={2} />
+              </View>
+              <View style={styles.disambigTitleBlock}>
+                <Text style={styles.disambigTitle}>Which one?</Text>
+                <Text style={styles.disambigSubtitle}>Pick the match</Text>
+              </View>
+            </View>
+
+            {/* Filename chip */}
+            {disambiguation && (
+              <View style={styles.disambigFileChip}>
+                <FileVideo2 size={14} color="#52525b" />
+                <Text style={styles.disambigFileText} numberOfLines={1} ellipsizeMode="middle">
                   {disambiguation.filename}
                 </Text>
               </View>
+            )}
 
-              <Text style={styles.modalQuestion}>
-                We found <Text style={styles.modalTitleHighlight}>{disambiguation.title}</Text> with multiple release years. Tap the correct one:
-              </Text>
-
-              {/* Option buttons — one per result */}
-              <ScrollView
-                style={styles.modalOptionsScroll}
-                contentContainerStyle={styles.modalOptionsContainer}
-                showsVerticalScrollIndicator={false}
-              >
-                {disambiguation.options.map((option) => (
+            {/* Poster card row */}
+            {disambiguation && (
+              <FlatList
+                data={disambiguation.options}
+                keyExtractor={(item) => item.id}
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={styles.disambigCardsList}
+                contentContainerStyle={styles.disambigCardsContent}
+                renderItem={({ item: option }) => (
                   <Pressable
-                    key={option.id}
                     style={({ pressed }) => [
-                      styles.modalOptionBtn,
-                      pressed && styles.modalOptionBtnPressed,
+                      styles.disambigCard,
+                      pressed && styles.disambigCardPressed,
                     ]}
-                    onPress={() => disambiguation.resolve(option.id)}
+                    onPress={() => {
+                      const r = disambiguation.resolve;
+                      setDisambiguation(null);
+                      r(option.id);
+                    }}
                     accessibilityRole="button"
-                    accessibilityLabel={`${option.title} from ${option.year}`}
+                    accessibilityLabel={`${option.title}, ${option.year}`}
                   >
-                    <View style={styles.modalOptionInner}>
-                      <Text style={styles.modalOptionTitle} numberOfLines={1}>
+                    {option.posterUrl ? (
+                      <Image
+                        source={{ uri: option.posterUrl }}
+                        style={styles.disambigPoster}
+                        resizeMode="cover"
+                      />
+                    ) : (
+                      <View style={styles.disambigPosterPlaceholder}>
+                        <Film size={28} color="#3f3f46" />
+                      </View>
+                    )}
+                    <View style={styles.disambigCardInfo}>
+                      <Text style={styles.disambigCardTitle} numberOfLines={2}>
                         {option.title}
                       </Text>
-                      <View style={styles.modalOptionYearBadge}>
-                        <Text style={styles.modalOptionYearText}>{option.year}</Text>
+                      <View style={styles.disambigYearBadge}>
+                        <Text style={styles.disambigYearText}>{option.year}</Text>
                       </View>
                     </View>
                   </Pressable>
-                ))}
-              </ScrollView>
+                )}
+              />
+            )}
 
-              {/* Skip — AI picks the best guess */}
-              <Pressable
-                style={styles.modalSkipBtn}
-                onPress={() => disambiguation.resolve(null)}
-                accessibilityRole="button"
-                accessibilityLabel="Skip and let AI decide"
-              >
-                <Text style={styles.modalSkipText}>Not sure — let AI decide</Text>
-              </Pressable>
-            </View>
+            {/* Skip button */}
+            <Pressable
+              style={styles.disambigSkipBtn}
+              onPress={() => {
+                if (disambiguation) {
+                  const r = disambiguation.resolve;
+                  setDisambiguation(null);
+                  r(null);
+                }
+              }}
+              accessibilityRole="button"
+              accessibilityLabel="Skip, let AI decide"
+            >
+              <Text style={styles.disambigSkipText}>Not sure — let AI decide</Text>
+            </Pressable>
           </View>
-        </Modal>
-      )}
+        </View>
+      </Modal>
 
       {aiToast ? (
         <Animated.View
@@ -1659,122 +1818,150 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "700",
   },
-  // ── Disambiguation modal ───────────────────────────────────────────────────
-  modalOverlay: {
+  // ── Disambiguation bottom-sheet ────────────────────────────────────────────
+  disambigOverlay: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.88)",
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 20,
+    backgroundColor: "rgba(0,0,0,0.75)",
+    justifyContent: "flex-end",
   },
-  modalContent: {
+  disambigSheet: {
     backgroundColor: "#18181b",
-    borderRadius: 20,
-    padding: 24,
-    width: "100%",
-    maxWidth: 420,
-    borderWidth: 1,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    paddingTop: 8,
+    paddingHorizontal: 20,
+    borderTopWidth: 1,
+    borderLeftWidth: 1,
+    borderRightWidth: 1,
     borderColor: "#27272a",
-    gap: 16,
+    maxHeight: "85%",
   },
-  modalHeader: {
+  disambigHandle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "#3f3f46",
+    alignSelf: "center",
+    marginBottom: 20,
+  },
+  disambigHeader: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
+    gap: 12,
+    marginBottom: 12,
   },
-  modalIconWrap: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
+  disambigIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
     backgroundColor: "rgba(251,191,36,0.12)",
     borderWidth: 1,
     borderColor: "rgba(251,191,36,0.3)",
     alignItems: "center",
     justifyContent: "center",
   },
-  modalTitle: {
+  disambigTitleBlock: {
+    flex: 1,
+  },
+  disambigTitle: {
     color: "#ffffff",
     fontSize: 18,
     fontWeight: "800",
+    lineHeight: 22,
   },
-  modalFilenameChip: {
+  disambigSubtitle: {
+    color: "#a1a1aa",
+    fontSize: 13,
+    fontWeight: "600",
+    marginTop: 2,
+  },
+  disambigFileChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
     backgroundColor: "rgba(255,255,255,0.05)",
     borderRadius: 10,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.1)",
     paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingVertical: 10,
+    marginBottom: 16,
   },
-  modalFilenameText: {
-    color: "#71717a",
-    fontSize: 11,
-    fontWeight: "600",
-    fontFamily: "monospace" as any,
-  },
-  modalQuestion: {
+  disambigFileText: {
+    flex: 1,
     color: "#a1a1aa",
-    fontSize: 14,
-    lineHeight: 21,
+    fontSize: 12,
+    fontWeight: "600",
   },
-  modalTitleHighlight: {
-    color: "#ffffff",
-    fontWeight: "700",
+  disambigCardsList: {
+    marginHorizontal: -20,
+    marginBottom: 16,
   },
-  modalOptionsScroll: {
-    maxHeight: 260,
+  disambigCardsContent: {
+    paddingHorizontal: 20,
+    gap: 12,
   },
-  modalOptionsContainer: {
-    gap: 8,
-  },
-  modalOptionBtn: {
-    borderRadius: 14,
+  disambigCard: {
+    width: 120,
+    borderRadius: 12,
+    overflow: "hidden",
+    backgroundColor: "rgba(255,255,255,0.05)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.12)",
-    backgroundColor: "rgba(255,255,255,0.05)",
-    paddingVertical: 14,
-    paddingHorizontal: 16,
   },
-  modalOptionBtnPressed: {
+  disambigCardPressed: {
     backgroundColor: "rgba(96,165,250,0.15)",
     borderColor: "rgba(96,165,250,0.5)",
   },
-  modalOptionInner: {
-    flexDirection: "row",
+  disambigPoster: {
+    width: "100%",
+    height: 160,
+    backgroundColor: "#27272a",
+  },
+  disambigPosterPlaceholder: {
+    width: "100%",
+    height: 160,
+    backgroundColor: "#27272a",
     alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
+    justifyContent: "center",
   },
-  modalOptionTitle: {
+  disambigCardInfo: {
+    padding: 10,
+    gap: 6,
+  },
+  disambigCardTitle: {
     color: "#ffffff",
-    fontSize: 15,
+    fontSize: 13,
     fontWeight: "700",
-    flex: 1,
+    lineHeight: 16,
   },
-  modalOptionYearBadge: {
+  disambigYearBadge: {
+    alignSelf: "flex-start",
     backgroundColor: "rgba(96,165,250,0.18)",
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
     borderWidth: 1,
     borderColor: "rgba(96,165,250,0.35)",
   },
-  modalOptionYearText: {
+  disambigYearText: {
     color: "#60a5fa",
-    fontSize: 13,
+    fontSize: 11,
     fontWeight: "800",
     fontVariant: ["tabular-nums"],
   },
-  modalSkipBtn: {
+  disambigSkipBtn: {
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 12,
+    paddingVertical: 14,
     borderRadius: 12,
     backgroundColor: "rgba(255,255,255,0.04)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.08)",
+    marginBottom: 8,
   },
-  modalSkipText: {
-    color: "#71717a",
+  disambigSkipText: {
+    color: "#a1a1aa",
     fontSize: 13,
     fontWeight: "600",
   },

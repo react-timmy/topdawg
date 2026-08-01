@@ -21,6 +21,7 @@ import {
   ActivityIndicator,
   Linking,
   Image,
+  Platform,
 } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -41,6 +42,11 @@ import {
   KeyRound,
   ShieldOff,
   UserX,
+  FolderTree,
+  HardDriveDownload,
+  CheckCircle2,
+  AlertTriangle,
+  Check,
 } from 'lucide-react-native';
 import Constants from 'expo-constants';
 import Animated, { FadeInDown } from 'react-native-reanimated';
@@ -51,6 +57,10 @@ import { usePro } from '../context/ProContext';
 import { setPro, FREE_SCAN_LIMIT } from '../storage/proStatusService';
 import { ProPaywallModal } from '../components/ProPaywallModal';
 import { PinPadModal, PinPadMode } from '../components/PinPadModal';
+import {
+  AppSheetModal,
+  AppSheetAction,
+} from '../components/AppSheetModal';
 import { pinService } from '../storage/pinService';
 import { profileService } from '../storage/profileService';
 import { watchHistoryService } from '../storage/watchHistoryService';
@@ -59,6 +69,11 @@ import { clearParseCache } from '../storage/aiParseCache';
 import { useAccount } from '../context/AccountContext';
 import { authService, FilmSortAccount } from '../services/authService';
 import { syncService } from '../services/syncService';
+import { fileOrganizeService } from '../services/fileOrganizeService';
+import {
+  libraryExportService,
+  ExportMode,
+} from '../services/libraryExportService';
 
 // ─── App version — read from app.json via expo-constants so it never drifts ──
 const APP_VERSION: string =
@@ -170,6 +185,22 @@ function AccountAvatar({ account, size = 32 }: { account: FilmSortAccount; size?
 
 type PendingClear = 'library' | 'cache' | 'history' | 'account' | null;
 
+type SheetConfig = {
+  visible: boolean;
+  title: string;
+  message: string;
+  icon?: React.ReactNode;
+  iconColor?: string;
+  actions?: AppSheetAction[];
+  dismissLabel?: string;
+};
+
+const HIDDEN_SHEET: SheetConfig = {
+  visible: false,
+  title: '',
+  message: '',
+};
+
 export function SettingsScreen() {
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
@@ -183,6 +214,16 @@ export function SettingsScreen() {
   const [purchasing, setPurchasing] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
+  const [organizing, setOrganizing] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportStatus, setExportStatus] = useState<string | null>(null);
+
+  // App-styled bottom sheet (Library tools + Data) instead of system Alert
+  const [sheet, setSheet] = useState<SheetConfig>(HIDDEN_SHEET);
+  const closeSheet = useCallback(() => setSheet(HIDDEN_SHEET), []);
+  const openSheet = useCallback((cfg: Omit<SheetConfig, 'visible'>) => {
+    setSheet({ ...cfg, visible: true });
+  }, []);
 
   // ── PIN lock ─────────────────────────────────────────────────────────────
   const [hasPin, setHasPin] = useState(false);
@@ -227,9 +268,19 @@ export function SettingsScreen() {
       try {
         await storageService.clearLibrary();
         await storageService.clearRecentlyMatched();
-        Alert.alert('Done', 'Your library has been cleared.');
+        openSheet({
+          title: 'Library cleared',
+          message: 'Your library has been cleared. Video files on your device were not deleted.',
+          icon: <CheckCircle2 size={28} color="#34d399" strokeWidth={2} />,
+          iconColor: '#34d399',
+        });
       } catch {
-        Alert.alert('Error', 'Failed to clear library. Please try again.');
+        openSheet({
+          title: 'Couldn’t clear library',
+          message: 'Failed to clear library. Please try again.',
+          icon: <AlertTriangle size={28} color="#f87171" strokeWidth={2} />,
+          iconColor: '#f87171',
+        });
       } finally {
         setClearingLibrary(false);
       }
@@ -243,9 +294,19 @@ export function SettingsScreen() {
         if (cacheKeys.length > 0) {
           await AsyncStorage.multiRemove(cacheKeys);
         }
-        Alert.alert('Done', `Cleared ${cacheKeys.length} cached item(s).`);
+        openSheet({
+          title: 'Cache cleared',
+          message: `Cleared ${cacheKeys.length} cached item(s). Posters and metadata will re-fetch as you browse.`,
+          icon: <CheckCircle2 size={28} color="#34d399" strokeWidth={2} />,
+          iconColor: '#34d399',
+        });
       } catch {
-        Alert.alert('Error', 'Failed to clear cache. Please try again.');
+        openSheet({
+          title: 'Couldn’t clear cache',
+          message: 'Failed to clear cache. Please try again.',
+          icon: <AlertTriangle size={28} color="#f87171" strokeWidth={2} />,
+          iconColor: '#f87171',
+        });
       } finally {
         setClearingCache(false);
       }
@@ -255,9 +316,19 @@ export function SettingsScreen() {
       setClearingHistory(true);
       try {
         await watchHistoryService.clearHistory();
-        Alert.alert('Done', 'Watch history cleared.');
+        openSheet({
+          title: 'History cleared',
+          message: 'Watch history cleared and badges reset.',
+          icon: <CheckCircle2 size={28} color="#34d399" strokeWidth={2} />,
+          iconColor: '#34d399',
+        });
       } catch {
-        Alert.alert('Error', 'Failed to clear watch history. Please try again.');
+        openSheet({
+          title: 'Couldn’t clear history',
+          message: 'Failed to clear watch history. Please try again.',
+          icon: <AlertTriangle size={28} color="#f87171" strokeWidth={2} />,
+          iconColor: '#f87171',
+        });
       } finally {
         setClearingHistory(false);
       }
@@ -300,14 +371,21 @@ export function SettingsScreen() {
         }
 
         await refreshPinState();
-        Alert.alert(
-          'Account deleted',
-          uid
+        openSheet({
+          title: 'Account deleted',
+          message: uid
             ? 'Your FilmSort account and local app data have been removed. Video files on your device were not deleted.'
             : 'All local FilmSort data has been wiped. Video files on your device were not deleted.',
-        );
+          icon: <CheckCircle2 size={28} color="#34d399" strokeWidth={2} />,
+          iconColor: '#34d399',
+        });
       } catch {
-        Alert.alert('Error', 'Could not fully delete the account. Please try again.');
+        openSheet({
+          title: 'Delete failed',
+          message: 'Could not fully delete the account. Please try again.',
+          icon: <AlertTriangle size={28} color="#f87171" strokeWidth={2} />,
+          iconColor: '#f87171',
+        });
       } finally {
         setDeletingAccount(false);
       }
@@ -337,47 +415,65 @@ export function SettingsScreen() {
       Alert.alert('PIN removed', 'Destructive actions no longer require a PIN.');
       return;
     }
-    // verify for a pending clear — then show the usual confirm dialog
+    // verify for a pending clear — then show the usual confirm sheet
     if (mode === 'verify' && kind) {
       if (kind === 'library') {
-        Alert.alert(
-          'Clear Library',
-          'This will remove all scanned titles from your library. Your video files will not be deleted. This cannot be undone.',
-          [
-            { text: 'Cancel', style: 'cancel' },
+        openSheet({
+          title: 'Clear library?',
+          message:
+            'This will remove all scanned titles from your library. Your video files will not be deleted. This cannot be undone.',
+          icon: <Trash2 size={28} color="#f87171" strokeWidth={2} />,
+          iconColor: '#f87171',
+          actions: [
+            { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
             {
-              text: 'Clear Library',
-              style: 'destructive',
-              onPress: () => void executeClear('library'),
+              label: 'Clear library',
+              variant: 'destructive',
+              onPress: () => {
+                closeSheet();
+                void executeClear('library');
+              },
             },
           ],
-        );
+        });
       } else if (kind === 'cache') {
-        Alert.alert(
-          'Clear Metadata Cache',
-          'Cached poster art and metadata will be removed. They will be re-fetched the next time you view your library.',
-          [
-            { text: 'Cancel', style: 'cancel' },
+        openSheet({
+          title: 'Clear metadata cache?',
+          message:
+            'Cached poster art and metadata will be removed. They will be re-fetched the next time you view your library.',
+          icon: <Database size={28} color="#f87171" strokeWidth={2} />,
+          iconColor: '#f87171',
+          actions: [
+            { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
             {
-              text: 'Clear Cache',
-              style: 'destructive',
-              onPress: () => void executeClear('cache'),
+              label: 'Clear cache',
+              variant: 'destructive',
+              onPress: () => {
+                closeSheet();
+                void executeClear('cache');
+              },
             },
           ],
-        );
+        });
       } else if (kind === 'history') {
-        Alert.alert(
-          'Clear Watch History',
-          'This will permanently delete your watch history and reset all badges. This cannot be undone.',
-          [
-            { text: 'Cancel', style: 'cancel' },
+        openSheet({
+          title: 'Clear watch history?',
+          message:
+            'This will permanently delete your watch history and reset all badges. This cannot be undone.',
+          icon: <Trash2 size={28} color="#f87171" strokeWidth={2} />,
+          iconColor: '#f87171',
+          actions: [
+            { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
             {
-              text: 'Clear History',
-              style: 'destructive',
-              onPress: () => void executeClear('history'),
+              label: 'Clear history',
+              variant: 'destructive',
+              onPress: () => {
+                closeSheet();
+                void executeClear('history');
+              },
             },
           ],
-        );
+        });
       } else if (kind === 'account') {
         confirmDeleteAccount();
       }
@@ -385,20 +481,25 @@ export function SettingsScreen() {
   };
 
   const confirmDeleteAccount = () => {
-    Alert.alert(
-      'Delete Account',
-      account
+    openSheet({
+      title: 'Delete account?',
+      message: account
         ? 'This permanently removes your FilmSort account, cloud sync data, library, history, PIN, and local settings. Video files on your device are not deleted. This cannot be undone.'
         : 'This permanently wipes all local FilmSort data (library, history, profile, PIN, caches). Video files on your device are not deleted. This cannot be undone.',
-      [
-        { text: 'Cancel', style: 'cancel' },
+      icon: <UserX size={28} color="#f87171" strokeWidth={2} />,
+      iconColor: '#f87171',
+      actions: [
+        { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
         {
-          text: 'Delete Everything',
-          style: 'destructive',
-          onPress: () => void executeClear('account'),
+          label: 'Delete everything',
+          variant: 'destructive',
+          onPress: () => {
+            closeSheet();
+            void executeClear('account');
+          },
         },
       ],
-    );
+    });
   };
 
   const handleDeleteAccount = () => {
@@ -454,57 +555,287 @@ export function SettingsScreen() {
     }
   };
 
+  // ── Auto-Rename & Folder Magic (Pro) ─────────────────────────────────────
+  const handleOrganizeLibrary = async () => {
+    if (!isPro) {
+      setShowPaywall(true);
+      return;
+    }
+
+    setOrganizing(true);
+    try {
+      const library = await storageService.getLibrary();
+      const preview = fileOrganizeService.previewOrganize(library);
+
+      if (preview.totalFiles === 0) {
+        openSheet({
+          title: 'Nothing to organize',
+          message: 'Scan some videos into your library first.',
+          icon: <FolderTree size={28} color="#60a5fa" strokeWidth={2} />,
+          iconColor: '#60a5fa',
+        });
+        return;
+      }
+
+      if (preview.wouldChange === 0) {
+        openSheet({
+          title: 'Already organized',
+          message: `All ${preview.totalFiles} file(s) already have clean names and folder paths.\n\nUse “Export to folder” to write Movies/ and TV Shows/ onto your drive.`,
+          icon: <Check size={28} color="#60a5fa" strokeWidth={2.4} />,
+          iconColor: '#60a5fa',
+        });
+        return;
+      }
+
+      const sampleLines = preview.samples
+        .slice(0, 3)
+        .map((s) => `• ${s.from}\n  → ${s.folder}/${s.to}`)
+        .join('\n\n');
+
+      openSheet({
+        title: 'Organize library?',
+        message: `${preview.wouldChange} of ${preview.totalFiles} file(s) will get clean Plex-style names and virtual folders inside FilmSort.\n\n${sampleLines}${
+          preview.samples.length > 3 ? '\n\n…' : ''
+        }\n\nThis only updates labels in the app. To write real folders on disk, use “Export to folder” next.`,
+        icon: <FolderTree size={28} color="#60a5fa" strokeWidth={2} />,
+        iconColor: '#60a5fa',
+        actions: [
+          { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
+          {
+            label: 'Organize',
+            variant: 'primary',
+            onPress: () => {
+              closeSheet();
+              void (async () => {
+                setOrganizing(true);
+                try {
+                  const result = await fileOrganizeService.applyOrganizeLibrary();
+                  openSheet({
+                    title: 'Library organized',
+                    message: `Updated ${result.filesRenamed} file(s) across ${result.titlesTouched} title(s).\n\nTip: use “Export to folder” to create Movies/ and TV Shows/ on your device.`,
+                    icon: <CheckCircle2 size={28} color="#34d399" strokeWidth={2} />,
+                    iconColor: '#34d399',
+                  });
+                } catch {
+                  openSheet({
+                    title: 'Organize failed',
+                    message: 'Could not organize the library. Please try again.',
+                    icon: <AlertTriangle size={28} color="#f87171" strokeWidth={2} />,
+                    iconColor: '#f87171',
+                  });
+                } finally {
+                  setOrganizing(false);
+                }
+              })();
+            },
+          },
+        ],
+      });
+    } catch {
+      openSheet({
+        title: 'Organize failed',
+        message: 'Could not preview organization. Please try again.',
+        icon: <AlertTriangle size={28} color="#f87171" strokeWidth={2} />,
+        iconColor: '#f87171',
+      });
+    } finally {
+      setOrganizing(false);
+    }
+  };
+
+  /** Copy organized files into a user-chosen folder tree. */
+  const runExport = async (mode: ExportMode, force = false) => {
+    setExporting(true);
+    setExportStatus('Preparing…');
+    try {
+      const result = await libraryExportService.exportOrganizedLibrary({
+        mode,
+        force,
+        organizeLabels: true,
+        onProgress: (p) => {
+          if (p.phase === 'copying' && p.current != null && p.total != null) {
+            setExportStatus(`${p.current}/${p.total} · ${p.currentFile ?? ''}`);
+          } else {
+            setExportStatus(p.message);
+          }
+        },
+      });
+
+      if (result.cancelled) {
+        openSheet({
+          title: 'Export cancelled',
+          message: 'No folder was selected.',
+          icon: <HardDriveDownload size={28} color="#a1a1aa" strokeWidth={2} />,
+          iconColor: '#a1a1aa',
+        });
+        return;
+      }
+
+      if (result.copied === 0 && result.failed === 0 && result.skipped === 0) {
+        openSheet({
+          title: 'Nothing to export',
+          message: 'Scan some videos into your library first.',
+          icon: <HardDriveDownload size={28} color="#34d399" strokeWidth={2} />,
+          iconColor: '#34d399',
+        });
+        return;
+      }
+
+      if (result.copied === 0 && result.skipped > 0 && result.failed === 0) {
+        openSheet({
+          title: 'Already exported',
+          message: `All ${result.skipped} file(s) are already in that folder with organized names.\n\nUse “Force re-export” only if you want to overwrite them.`,
+          icon: <Check size={28} color="#34d399" strokeWidth={2.4} />,
+          iconColor: '#34d399',
+        });
+        return;
+      }
+
+      const parts = [
+        result.copied > 0 ? `Copied ${result.copied} new file(s)` : null,
+        result.skipped > 0 ? `skipped ${result.skipped} already exported` : null,
+        result.failed > 0 ? `${result.failed} failed` : null,
+      ].filter(Boolean);
+
+      const moveNote =
+        mode === 'move'
+          ? result.deletedOriginals > 0
+            ? `\nRemoved ${result.deletedOriginals} original(s) where allowed.`
+            : '\nGallery/MediaStore originals were kept (so FilmSort can still play them).'
+          : '\nFilmSort still plays from the original files in your library.';
+
+      openSheet({
+        title: result.failed === 0 ? 'Export complete' : 'Export finished with errors',
+        message: `${parts.join(', ')}.${moveNote}\n\n${result.rootHint}`,
+        icon:
+          result.failed === 0 ? (
+            <CheckCircle2 size={28} color="#34d399" strokeWidth={2} />
+          ) : (
+            <AlertTriangle size={28} color="#facc15" strokeWidth={2} />
+          ),
+        iconColor: result.failed === 0 ? '#34d399' : '#facc15',
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      openSheet({
+        title: 'Export failed',
+        message: msg || 'Could not export the library.',
+        icon: <AlertTriangle size={28} color="#f87171" strokeWidth={2} />,
+        iconColor: '#f87171',
+      });
+    } finally {
+      setExporting(false);
+      setExportStatus(null);
+    }
+  };
+
+  const handleExportLibrary = () => {
+    if (!isPro) {
+      setShowPaywall(true);
+      return;
+    }
+
+    const platformHint =
+      Platform.OS === 'android'
+        ? 'Android will ask you to pick a destination folder. FilmSort creates Movies/ and TV Shows/ inside it.'
+        : 'On iOS, files go to the FilmSort folder in the Files app (On My iPhone → FilmSort → FilmSort Library).';
+
+    openSheet({
+      title: 'Export organized library',
+      message: `${platformHint}\n\nAlready-exported files are skipped so you don’t get duplicates. “Force re-export” overwrites existing organized files.`,
+      icon: <HardDriveDownload size={28} color="#34d399" strokeWidth={2} />,
+      iconColor: '#34d399',
+      actions: [
+        { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
+        {
+          label: 'Force re-export',
+          variant: 'destructive',
+          onPress: () => {
+            closeSheet();
+            void runExport('copy', true);
+          },
+        },
+        {
+          label: 'Export new only',
+          variant: 'primary',
+          onPress: () => {
+            closeSheet();
+            void runExport('copy', false);
+          },
+        },
+      ],
+    });
+  };
+
   // ── Clear library ──────────────────────────────────────────────────────────
   const handleClearLibrary = () => {
     void requirePinThen('library', () => {
-      Alert.alert(
-        'Clear Library',
-        'This will remove all scanned titles from your library. Your video files will not be deleted. This cannot be undone.',
-        [
-          { text: 'Cancel', style: 'cancel' },
+      openSheet({
+        title: 'Clear library?',
+        message:
+          'This will remove all scanned titles from your library. Your video files will not be deleted. This cannot be undone.',
+        icon: <Trash2 size={28} color="#f87171" strokeWidth={2} />,
+        iconColor: '#f87171',
+        actions: [
+          { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
           {
-            text: 'Clear Library',
-            style: 'destructive',
-            onPress: () => void executeClear('library'),
+            label: 'Clear library',
+            variant: 'destructive',
+            onPress: () => {
+              closeSheet();
+              void executeClear('library');
+            },
           },
         ],
-      );
+      });
     });
   };
 
   // ── Clear TMDB cache ───────────────────────────────────────────────────────
   const handleClearCache = () => {
     void requirePinThen('cache', () => {
-      Alert.alert(
-        'Clear Metadata Cache',
-        'Cached poster art and metadata will be removed. They will be re-fetched the next time you view your library. This is useful if posters appear incorrect.',
-        [
-          { text: 'Cancel', style: 'cancel' },
+      openSheet({
+        title: 'Clear metadata cache?',
+        message:
+          'Cached poster art and metadata will be removed. They will be re-fetched the next time you view your library. This is useful if posters appear incorrect.',
+        icon: <Database size={28} color="#f87171" strokeWidth={2} />,
+        iconColor: '#f87171',
+        actions: [
+          { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
           {
-            text: 'Clear Cache',
-            style: 'destructive',
-            onPress: () => void executeClear('cache'),
+            label: 'Clear cache',
+            variant: 'destructive',
+            onPress: () => {
+              closeSheet();
+              void executeClear('cache');
+            },
           },
         ],
-      );
+      });
     });
   };
 
   // ── Clear watch history ────────────────────────────────────────────────────
   const handleClearHistory = () => {
     void requirePinThen('history', () => {
-      Alert.alert(
-        'Clear Watch History',
-        'This will permanently delete your watch history and reset all badges. This cannot be undone.',
-        [
-          { text: 'Cancel', style: 'cancel' },
+      openSheet({
+        title: 'Clear watch history?',
+        message:
+          'This will permanently delete your watch history and reset all badges. This cannot be undone.',
+        icon: <Trash2 size={28} color="#f87171" strokeWidth={2} />,
+        iconColor: '#f87171',
+        actions: [
+          { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
           {
-            text: 'Clear History',
-            style: 'destructive',
-            onPress: () => void executeClear('history'),
+            label: 'Clear history',
+            variant: 'destructive',
+            onPress: () => {
+              closeSheet();
+              void executeClear('history');
+            },
           },
         ],
-      );
+      });
     });
   };
 
@@ -698,6 +1029,76 @@ export function SettingsScreen() {
                 )}
               </View>
             </View>
+
+            {/* Auto-Rename & Folder Magic */}
+            <View style={styles.hubSection}>
+              <Text style={styles.hubLabel}>Library tools</Text>
+              <Pressable
+                style={styles.hubRow}
+                onPress={handleOrganizeLibrary}
+                disabled={organizing || exporting}
+              >
+                <View style={[styles.hubIcon, styles.hubIconOrganize]}>
+                  <FolderTree size={16} color="#60a5fa" strokeWidth={2.1} />
+                </View>
+                <View style={styles.hubBody}>
+                  <View style={styles.hubTitleRow}>
+                    <Text style={styles.hubTitle}>Auto-Rename & Folders</Text>
+                    {!isPro && (
+                      <View style={[styles.hubBadge, styles.hubBadgeMuted]}>
+                        <Text style={[styles.hubBadgeText, styles.hubBadgeTextMuted]}>Pro</Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text style={styles.hubSub} numberOfLines={2}>
+                    {isPro
+                      ? 'Clean Plex-style names inside FilmSort'
+                      : 'Unlock Pro to organize messy filenames'}
+                  </Text>
+                </View>
+                {organizing ? (
+                  <ActivityIndicator color="#60a5fa" size="small" />
+                ) : (
+                  <ChevronRight size={18} color="#52525b" strokeWidth={2} />
+                )}
+              </Pressable>
+
+              <View style={styles.hubToolsDivider} />
+
+              <Pressable
+                style={styles.hubRow}
+                onPress={handleExportLibrary}
+                disabled={organizing || exporting}
+              >
+                <View style={[styles.hubIcon, styles.hubIconExport]}>
+                  <HardDriveDownload size={16} color="#34d399" strokeWidth={2.1} />
+                </View>
+                <View style={styles.hubBody}>
+                  <View style={styles.hubTitleRow}>
+                    <Text style={styles.hubTitle}>Export to folder</Text>
+                    {!isPro && (
+                      <View style={[styles.hubBadge, styles.hubBadgeMuted]}>
+                        <Text style={[styles.hubBadgeText, styles.hubBadgeTextMuted]}>Pro</Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text style={styles.hubSub} numberOfLines={2}>
+                    {exporting && exportStatus
+                      ? exportStatus
+                      : isPro
+                        ? Platform.OS === 'android'
+                          ? 'Copy Movies/ & TV Shows/ to a folder you pick'
+                          : 'Write Movies/ & TV Shows/ into the Files app'
+                        : 'Unlock Pro to write organized folders on disk'}
+                  </Text>
+                </View>
+                {exporting ? (
+                  <ActivityIndicator color="#34d399" size="small" />
+                ) : (
+                  <ChevronRight size={18} color="#52525b" strokeWidth={2} />
+                )}
+              </Pressable>
+            </View>
           </View>
         </Animated.View>
 
@@ -824,6 +1225,17 @@ export function SettingsScreen() {
         mode={pinMode}
         onSuccess={() => void handlePinSuccess()}
         onCancel={closePin}
+      />
+
+      <AppSheetModal
+        visible={sheet.visible}
+        onClose={closeSheet}
+        title={sheet.title}
+        message={sheet.message}
+        icon={sheet.icon}
+        iconColor={sheet.iconColor}
+        actions={sheet.actions}
+        dismissLabel={sheet.dismissLabel}
       />
     </View>
   );
@@ -1003,6 +1415,19 @@ const styles = StyleSheet.create({
   hubIconFree: {
     backgroundColor: 'rgba(250,204,21,0.1)',
     borderColor: 'rgba(250,204,21,0.22)',
+  },
+  hubIconOrganize: {
+    backgroundColor: 'rgba(96,165,250,0.12)',
+    borderColor: 'rgba(96,165,250,0.28)',
+  },
+  hubIconExport: {
+    backgroundColor: 'rgba(52,211,153,0.12)',
+    borderColor: 'rgba(52,211,153,0.28)',
+  },
+  hubToolsDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    marginLeft: 52,
   },
   hubIconGoogle: {
     backgroundColor: 'rgba(66,133,244,0.12)',

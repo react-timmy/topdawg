@@ -56,38 +56,38 @@ export function LegalConsentGate({ onAccept, onDecline }: LegalConsentGateProps)
     onDecline();
   };
 
+  // Gate fills the tab scene (already above the custom tab bar). Don't add
+  // safe-area bottom padding here — that floats the CTAs away from the tabs.
   return (
     <Animated.View
       entering={FadeIn.duration(220)}
-      style={[styles.root, { paddingTop: insets.top, paddingBottom: insets.bottom }]}
+      style={[styles.root, { paddingTop: insets.top }]}
     >
       {/* ── Scrollable content: hero + data card + legal links ── */}
       <ScrollView
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
         bounces={false}
+        style={styles.scrollFlex}
       >
         {/* ── Icon + heading ── */}
         <Animated.View entering={FadeInDown.delay(60).duration(380)} style={styles.heroBlock}>
           <View style={styles.iconRing}>
             <ShieldCheck size={36} color="#60a5fa" strokeWidth={1.8} />
           </View>
-          <Text style={styles.heroTitle}>Before you scan</Text>
+          <Text style={styles.heroTitle}>Quick consent</Text>
           <Text style={styles.heroSubtitle}>
-            FilmSort sends video{' '}
-            <Text style={styles.bold}>filenames</Text>
-            {' '}(not file contents) to third-party APIs to find matching posters and metadata.
-            Please review our policies before continuing.
+            We only send video <Text style={styles.bold}>names</Text> to find posters — never the video itself.
           </Text>
         </Animated.View>
 
         {/* ── Data summary card ── */}
         <Animated.View entering={FadeInDown.delay(120).duration(380)} style={styles.card}>
-          <Text style={styles.cardTitle}>What gets sent</Text>
+          <Text style={styles.cardTitle}>What we use</Text>
           {[
-            { dot: '#60a5fa', text: 'Filenames → Google Gemini AI (title parsing)' },
-            { dot: '#a78bfa', text: 'Parsed titles → TMDB (poster & metadata lookup)' },
-            { dot: '#34d399', text: 'No video content, audio, or personal data ever leaves your device' },
+            { dot: '#60a5fa', text: 'Names → AI (title guess)' },
+            { dot: '#a78bfa', text: 'Titles → TMDB (posters)' },
+            { dot: '#34d399', text: 'Videos stay on your phone' },
           ].map((row, i) => (
             <View key={i} style={styles.cardRow}>
               <View style={[styles.dot, { backgroundColor: row.dot }]} />
@@ -98,7 +98,7 @@ export function LegalConsentGate({ onAccept, onDecline }: LegalConsentGateProps)
 
         {/* ── Legal links ── */}
         <Animated.View entering={FadeInDown.delay(180).duration(380)} style={styles.linksBlock}>
-          <Text style={styles.linksLabel}>Read before accepting</Text>
+          <Text style={styles.linksLabel}>Policies</Text>
 
           <Pressable
             style={({ pressed }) => [styles.linkRow, pressed && styles.linkRowPressed]}
@@ -120,28 +120,26 @@ export function LegalConsentGate({ onAccept, onDecline }: LegalConsentGateProps)
         </Animated.View>
       </ScrollView>
 
-      {/* ── Sticky bottom: checkboxes + CTAs ── always visible, never scrolled away */}
+      {/* ── Sticky bottom: checkboxes + CTAs — tight to tab bar ── */}
       <Animated.View
         entering={FadeInDown.delay(240).duration(380)}
         style={styles.stickyBottom}
       >
-        {/* subtle top separator */}
         <View style={styles.stickyDivider} />
 
-        {/* Checkboxes */}
         <View style={styles.checkboxBlock}>
           <Pressable style={styles.checkboxRow} onPress={() => setAgreed((v) => !v)}>
             {agreed
               ? <CheckSquare size={22} color="#60a5fa" strokeWidth={2} />
               : <Square size={22} color="#52525b" strokeWidth={2} />}
             <Text style={styles.checkboxText}>
-              I have read and agree to the{' '}
+              I agree to the{' '}
               <Text style={styles.checkboxLink} onPress={() => navigation.navigate('TermsOfUse')}>
-                Terms of Use
+                Terms
               </Text>
               {' '}and{' '}
               <Text style={styles.checkboxLink} onPress={() => navigation.navigate('PrivacyPolicy')}>
-                Privacy Policy
+                Privacy
               </Text>
             </Text>
           </Pressable>
@@ -151,13 +149,11 @@ export function LegalConsentGate({ onAccept, onDecline }: LegalConsentGateProps)
               ? <CheckSquare size={22} color="#60a5fa" strokeWidth={2} />
               : <Square size={22} color="#52525b" strokeWidth={2} />}
             <Text style={styles.checkboxText}>
-              I understand that media <Text style={styles.bold}>filenames</Text> (not video files)
-              may be sent to third-party APIs for matching
+              Only file <Text style={styles.bold}>names</Text> may leave this device for matching
             </Text>
           </Pressable>
         </View>
 
-        {/* CTAs */}
         <View style={styles.ctaBlock}>
           <Pressable
             style={[styles.acceptBtn, !canAccept && styles.acceptBtnDisabled]}
@@ -170,14 +166,14 @@ export function LegalConsentGate({ onAccept, onDecline }: LegalConsentGateProps)
           </Pressable>
 
           <Pressable style={styles.declineBtn} onPress={handleDecline}>
-            <Text style={styles.declineBtnText}>Not now</Text>
+            <Text style={styles.declineBtnText}>Later</Text>
           </Pressable>
 
           {declined && (
             <Animated.View entering={FadeIn.duration(300)} style={styles.declinedNotice}>
               <AlertCircle size={15} color="#f59e0b" strokeWidth={2} />
               <Text style={styles.declinedNoticeText}>
-                Scanning is disabled until you accept the terms. Tap "Accept &amp; Continue" above to proceed.
+                Accept to scan. Tap Accept &amp; Continue above.
               </Text>
             </Animated.View>
           )}
@@ -195,23 +191,27 @@ const styles = StyleSheet.create({
     backgroundColor: '#000000',
     zIndex: 100,
   },
+  scrollFlex: {
+    flex: 1,
+  },
   scroll: {
     paddingHorizontal: 24,
-    paddingTop: 32,
-    paddingBottom: 16,
+    paddingTop: 24,
+    paddingBottom: 12,
+    flexGrow: 1,
   },
 
-  // Sticky bottom panel
+  // Sticky bottom — snug against the tab bar
   stickyBottom: {
     paddingHorizontal: 24,
-    paddingTop: 16,
-    paddingBottom: 8,
+    paddingTop: 10,
+    paddingBottom: 6,
     backgroundColor: '#000000',
   },
   stickyDivider: {
     height: 1,
     backgroundColor: 'rgba(255,255,255,0.07)',
-    marginBottom: 28,
+    marginBottom: 12,
   },
 
   // Hero
@@ -328,8 +328,8 @@ const styles = StyleSheet.create({
 
   // Checkboxes
   checkboxBlock: {
-    gap: 16,
-    marginBottom: 20,
+    gap: 12,
+    marginBottom: 12,
   },
   checkboxRow: {
     flexDirection: 'row',
@@ -340,7 +340,7 @@ const styles = StyleSheet.create({
     flex: 1,
     color: '#a1a1aa',
     fontSize: 14,
-    lineHeight: 22,
+    lineHeight: 21,
   },
   checkboxLink: {
     color: '#60a5fa',
@@ -349,12 +349,12 @@ const styles = StyleSheet.create({
 
   // CTAs
   ctaBlock: {
-    gap: 12,
+    gap: 4,
   },
   acceptBtn: {
     backgroundColor: '#ffffff',
     borderRadius: 14,
-    paddingVertical: 16,
+    paddingVertical: 15,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -368,7 +368,7 @@ const styles = StyleSheet.create({
     letterSpacing: -0.2,
   },
   declineBtn: {
-    paddingVertical: 14,
+    paddingVertical: 10,
     alignItems: 'center',
   },
   declineBtnText: {
@@ -385,6 +385,7 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(245,158,11,0.2)',
     borderRadius: 12,
     padding: 12,
+    marginTop: 4,
   },
   declinedNoticeText: {
     flex: 1,

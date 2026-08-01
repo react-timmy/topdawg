@@ -24,7 +24,6 @@ import {
   StyleSheet,
   StatusBar,
   ActivityIndicator,
-  useWindowDimensions,
   Keyboard,
   Platform,
 } from 'react-native';
@@ -36,7 +35,6 @@ import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withSpring,
-  withTiming,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Pencil, Clapperboard } from 'lucide-react-native';

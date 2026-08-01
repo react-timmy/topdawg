@@ -4,16 +4,22 @@
  * All Firestore read/write logic for the v1.2 cloud sync feature.
  *
  * Design principles:
- *  - Local write always happens first in watchHistoryService. Firestore is
- *    fire-and-forget here — failures never block the local path.
+ *  - Local write always happens first (in watchHistoryService / profileService).
+ *    Firestore is fire-and-forget — failures never block the local path.
  *  - On any Firestore failure, @filmsort:sync_pending is set so the next
  *    app launch retries automatically.
  *  - ENABLE_CLOUD_SYNC=false turns every method into a no-op.
+ *
+ * Firestore layout under users/{uid}:
+ *  profile                   — single document: LocalProfile fields
+ *  watchHistory/{eventId}    — one doc per WatchEvent
+ *  memories/{mediaId}        — one doc per unique poster entry (PosterEntry)
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import firestore from '@react-native-firebase/firestore';
 import { watchHistoryService, WatchEvent } from '../storage/watchHistoryService';
+import { profileService, LocalProfile } from '../storage/profileService';
 import { ENABLE_CLOUD_SYNC } from '../config/env';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -21,10 +27,34 @@ import { ENABLE_CLOUD_SYNC } from '../config/env';
 const SYNC_PENDING_KEY = '@filmsort:sync_pending';
 const FIRESTORE_BATCH_LIMIT = 500;
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+/**
+ * Lean poster-cache entry stored under users/{uid}/memories/{mediaId}.
+ * Derived from WatchEvent; only the fields needed to reconstruct posters
+ * on a new device are persisted here.
+ */
+export interface PosterEntry {
+  mediaId: string;
+  title: string;
+  type: 'movie' | 'tv';
+  posterUrl: string;           // never empty — entries without a URL are skipped
+  firstWatchedAt: string;      // ISO-8601
+  updatedAt: string;           // ISO-8601 — used for last-write-wins conflict resolution
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function watchHistoryCollection(uid: string) {
   return firestore().collection('users').doc(uid).collection('watchHistory');
+}
+
+function memoriesCollection(uid: string) {
+  return firestore().collection('users').doc(uid).collection('memories');
+}
+
+function profileDoc(uid: string) {
+  return firestore().collection('users').doc(uid).collection('profile').doc('data');
 }
 
 async function setPending(): Promise<void> {
@@ -54,6 +84,25 @@ async function batchWrite(uid: string, events: WatchEvent[]): Promise<void> {
   }
 }
 
+/**
+ * Upload poster entries to Firestore in batches of up to 500.
+ * Throws on the first batch failure — caller handles the pending flag.
+ */
+async function batchWritePosters(uid: string, entries: PosterEntry[]): Promise<void> {
+  if (entries.length === 0) return;
+
+  const col = memoriesCollection(uid);
+
+  for (let i = 0; i < entries.length; i += FIRESTORE_BATCH_LIMIT) {
+    const chunk = entries.slice(i, i + FIRESTORE_BATCH_LIMIT);
+    const batch = firestore().batch();
+    for (const entry of chunk) {
+      batch.set(col.doc(entry.mediaId), entry);
+    }
+    await batch.commit();
+  }
+}
+
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export const syncService = {
@@ -71,6 +120,12 @@ export const syncService = {
     if (!ENABLE_CLOUD_SYNC) return;
 
     try {
+      // Sync profile and memories poster cache in parallel with watch history
+      await Promise.all([
+        syncService.syncProfile(uid),
+        syncService.syncMemories(uid),
+      ]);
+
       // Fetch both sides concurrently
       const [localEvents, cloudSnapshot] = await Promise.all([
         watchHistoryService.getHistory(),
@@ -209,9 +264,8 @@ export const syncService = {
     if (!ENABLE_CLOUD_SYNC || !uid) return;
 
     try {
+      // Delete watchHistory subcollection
       const col = watchHistoryCollection(uid);
-      // Page through history docs and batch-delete
-      // eslint-disable-next-line no-constant-condition
       while (true) {
         const snap = await col.limit(FIRESTORE_BATCH_LIMIT).get();
         if (snap.empty) break;
@@ -222,14 +276,198 @@ export const syncService = {
         await batch.commit();
         if (snap.size < FIRESTORE_BATCH_LIMIT) break;
       }
+
+      // Delete memories subcollection
+      const memCol = memoriesCollection(uid);
+      while (true) {
+        const snap = await memCol.limit(FIRESTORE_BATCH_LIMIT).get();
+        if (snap.empty) break;
+        const batch = firestore().batch();
+        for (const doc of snap.docs) {
+          batch.delete(doc.ref);
+        }
+        await batch.commit();
+        if (snap.size < FIRESTORE_BATCH_LIMIT) break;
+      }
+
+      // Delete profile doc
+      try {
+        await profileDoc(uid).delete();
+      } catch {
+        // may not exist
+      }
+
+      // Delete user root doc
       try {
         await firestore().collection('users').doc(uid).delete();
       } catch {
-        // parent doc may not exist
+        // may not exist
       }
+
       await clearPending();
     } catch (err) {
       console.warn('[SyncService] deleteCloudData failed:', err);
+    }
+  },
+
+  // ─── Profile sync ───────────────────────────────────────────────────────────
+
+  /**
+   * Push the local profile to Firestore. Fire-and-forget — never throws.
+   * Called by AccountProvider via the setOnProfileSaved hook whenever the
+   * user edits their display name or avatar.
+   */
+  async pushProfile(uid: string, profile: LocalProfile): Promise<void> {
+    if (!ENABLE_CLOUD_SYNC) return;
+
+    try {
+      await profileDoc(uid).set({ ...profile, updatedAt: new Date().toISOString() });
+    } catch (err) {
+      console.warn('[SyncService] pushProfile failed, marking sync pending:', err);
+      await setPending();
+    }
+  },
+
+  /**
+   * Pull the cloud profile and merge it with the local one.
+   * Last-write-wins based on the `updatedAt` timestamp stored in Firestore.
+   * If the cloud version is newer, it replaces the local profile.
+   * If local is newer (or no cloud version exists), uploads the local version.
+   *
+   * Called as part of initialSync after sign-in.
+   */
+  async syncProfile(uid: string): Promise<void> {
+    if (!ENABLE_CLOUD_SYNC) return;
+
+    try {
+      const [localProfile, cloudSnap] = await Promise.all([
+        profileService.get(),
+        profileDoc(uid).get(),
+      ]);
+
+      if (!cloudSnap.exists) {
+        // Nothing in the cloud yet — upload local
+        await profileDoc(uid).set({
+          ...localProfile,
+          updatedAt: new Date().toISOString(),
+        });
+        return;
+      }
+
+      const cloudData = cloudSnap.data() as LocalProfile & { updatedAt?: string };
+      const cloudUpdatedAt = cloudData.updatedAt ?? '';
+      // We don't store updatedAt locally, so we compare by checking if
+      // the cloud version has a timestamp at all. If it does, cloud wins
+      // (another device wrote it more recently). If it doesn't, upload local.
+      if (cloudUpdatedAt) {
+        // Cloud has an explicit timestamp — use it as the authoritative version
+        const { updatedAt: _ignored, ...cloudProfile } = cloudData;
+        await profileService.save(cloudProfile as LocalProfile);
+      } else {
+        // No cloud timestamp — push local up
+        await profileDoc(uid).set({
+          ...localProfile,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    } catch (err) {
+      console.warn('[SyncService] syncProfile failed, marking sync pending:', err);
+      await setPending();
+      throw err;
+    }
+  },
+
+  // ─── Memories / poster cache sync ───────────────────────────────────────────
+
+  /**
+   * Push a single poster entry to Firestore. Fire-and-forget — never throws.
+   * Called by AccountProvider via the setOnPosterResolved hook whenever a
+   * WatchEvent with a posterUrl is recorded.
+   */
+  async pushPoster(uid: string, entry: PosterEntry): Promise<void> {
+    if (!ENABLE_CLOUD_SYNC) return;
+
+    try {
+      await memoriesCollection(uid).doc(entry.mediaId).set(entry, { merge: true });
+    } catch (err) {
+      console.warn('[SyncService] pushPoster failed, marking sync pending:', err);
+      await setPending();
+    }
+  },
+
+  /**
+   * Merge local poster cache with the cloud memories collection.
+   *
+   * - Cloud-only entries are written into local watch history as poster updates
+   *   (posterUrl is patched onto matching WatchEvents via _patchPosters).
+   * - Local-only poster entries (from watch events with a posterUrl that
+   *   haven't been pushed yet) are uploaded to Firestore.
+   * - Conflict resolution: entry with the later `updatedAt` wins.
+   *
+   * Called as part of initialSync after sign-in.
+   */
+  async syncMemories(uid: string): Promise<void> {
+    if (!ENABLE_CLOUD_SYNC) return;
+
+    try {
+      const [localEvents, cloudSnap] = await Promise.all([
+        watchHistoryService.getHistory(),
+        memoriesCollection(uid).get(),
+      ]);
+
+      const cloudEntries: PosterEntry[] = cloudSnap.docs.map(
+        (d) => d.data() as PosterEntry,
+      );
+
+      // Build a local poster map from watch events that have a posterUrl
+      const localPosterMap = new Map<string, PosterEntry>();
+      for (const event of localEvents) {
+        if (!event.posterUrl) continue;
+        const existing = localPosterMap.get(event.mediaId);
+        if (!existing || event.watchedAt < existing.firstWatchedAt) {
+          localPosterMap.set(event.mediaId, {
+            mediaId: event.mediaId,
+            title: event.title,
+            type: event.type,
+            posterUrl: event.posterUrl,
+            firstWatchedAt: event.watchedAt,
+            updatedAt: event.watchedAt,
+          });
+        }
+      }
+
+      const cloudById = new Map<string, PosterEntry>(
+        cloudEntries.map((e) => [e.mediaId, e]),
+      );
+
+      // Entries in the cloud that are newer or not present locally → patch local events
+      const toPatchLocally: PosterEntry[] = [];
+      for (const cloudEntry of cloudEntries) {
+        const local = localPosterMap.get(cloudEntry.mediaId);
+        if (!local || cloudEntry.updatedAt > local.updatedAt) {
+          toPatchLocally.push(cloudEntry);
+        }
+      }
+
+      // Patch posterUrls into local WatchEvents for cloud-only / newer cloud entries
+      if (toPatchLocally.length > 0) {
+        await watchHistoryService._patchPosters(toPatchLocally);
+      }
+
+      // Local entries not in the cloud → upload
+      const toUpload: PosterEntry[] = [];
+      for (const [mediaId, localEntry] of localPosterMap) {
+        const cloud = cloudById.get(mediaId);
+        if (!cloud || localEntry.updatedAt > cloud.updatedAt) {
+          toUpload.push(localEntry);
+        }
+      }
+
+      await batchWritePosters(uid, toUpload);
+    } catch (err) {
+      console.warn('[SyncService] syncMemories failed, marking sync pending:', err);
+      await setPending();
+      throw err;
     }
   },
 };

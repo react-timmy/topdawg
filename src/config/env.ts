@@ -18,8 +18,22 @@ const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, string>;
 /** TMDB v3 read API key — https://www.themoviedb.org/settings/api */
 export const TMDB_API_KEY: string = extra.tmdbApiKey ?? '';
 
-/** Gemini API key — https://aistudio.google.com/app/apikey */
-export const GEMINI_API_KEY: string = extra.geminiApiKey ?? '';
+/**
+ * Free-tier Gemini API keys (comma-separated in GEMINI_API_KEY / extra.geminiApiKey).
+ * Rotated on 429; when all are cooling down the free queue waits ~60s.
+ */
+const rawGeminiKeys = extra.geminiApiKey ?? '';
+export const GEMINI_API_KEYS: string[] = rawGeminiKeys
+  .split(',')
+  .map((k) => k.trim())
+  .filter(Boolean);
+
+/**
+ * Pro VIP key — Priority Queue / "Skip the Line".
+ * Only used when isPro === true. Never shared with free users.
+ * Falls back to the free pool if unset (dev / single-key setups).
+ */
+export const GEMINI_PRO_API_KEY: string = (extra.geminiProApiKey ?? '').trim();
 
 /**
  * Gemini model fallback chain.
@@ -30,8 +44,8 @@ export const GEMINI_API_KEY: string = extra.geminiApiKey ?? '';
  *   gemma-4-26b-a4b-it  — also free tier       (fallback)
  */
 export const GEMINI_MODELS = [
-  'gemma-4-31b-it',      // primary — Gemma 4 31B, 1500 req/day free
-  'gemma-4-26b-a4b-it',  // fallback — Gemma 4 26B MoE variant
+  'gemma-4-31b-it', // primary — Gemma 4 31B, 1500 req/day free
+  'gemma-4-26b-a4b-it', // fallback — Gemma 4 26B MoE variant
 ] as const;
 
 /** Google Sign-In web client ID (from Firebase Console → OAuth 2.0 credentials) */

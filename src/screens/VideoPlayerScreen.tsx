@@ -38,7 +38,6 @@ import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withTiming,
-  withRepeat,
   Easing,
   cancelAnimation,
   runOnJS,
@@ -195,7 +194,8 @@ export function VideoPlayerScreen() {
   const initialStartPosition = route.params.startPosition ?? 0;
   const insets = useSafeAreaInsets();
   const { width: windowW, height: windowH } = useWindowDimensions();
-  const episodesPanelW = Math.min(420, Math.max(280, windowW * 0.4));
+  // Compact right sheet — wide enough for episode cards, not a half-screen slab
+  const episodesPanelW = Math.min(300, Math.max(280, Math.round(windowW * 0.32)));
   const { checkForNewBadges } = useBadgeUnlock();
 
   const [item, setItem] = useState<MediaItem>(initialItem);
@@ -234,11 +234,44 @@ export function VideoPlayerScreen() {
   const [selectedSeason, setSelectedSeason] = useState<number | null>(defaultSeason);
   const [seasonDropdownOpen, setSeasonDropdownOpen] = useState(false);
 
+  // Track completed episodes
+  const [completedEpisodes, setCompletedEpisodes] = useState<Set<string>>(new Set());
+
   // Episodes visible in the panel — filtered to selected season (or all if no seasons)
   const visibleEpisodes = useMemo(() => {
     if (seasonNumbers.length === 0 || selectedSeason === null) return episodes;
     return episodes.filter((ep) => ep.seasonNumber === selectedSeason);
   }, [episodes, seasonNumbers, selectedSeason]);
+
+  // Fetch completion status for all episodes when episodes list changes
+  useEffect(() => {
+    if (episodes.length === 0) return;
+    
+    const fetchCompletionStatus = async () => {
+      const completed = new Set<string>();
+      await Promise.all(
+        episodes.map(async (ep) => {
+          const progress = await watchProgressService.get(progressMediaId, ep);
+          // Check if episode was watched to completion (progress will be cleared at 92%)
+          // or if position is very close to duration
+          if (!progress) {
+            // No progress means either never watched OR completed (cleared at 92%)
+            // We can't distinguish, so we'll assume not completed
+            return;
+          }
+          if (progress.durationSeconds > 0) {
+            const fraction = progress.positionSeconds / progress.durationSeconds;
+            if (fraction >= COMPLETED_FRACTION) {
+              completed.add(fileKey(ep));
+            }
+          }
+        })
+      );
+      setCompletedEpisodes(completed);
+    };
+
+    void fetchCompletionStatus();
+  }, [episodes, progressMediaId]);
 
   // ── Episodes panel scroll-to-active ──────────────────────────────────────
   const episodesScrollRef = useRef<ScrollView>(null);
@@ -286,6 +319,10 @@ export function VideoPlayerScreen() {
   }, []);
   const [episodesOpen, setEpisodesOpen] = useState(false);
   const [audioOpen, setAudioOpen] = useState(false);
+  const episodesOpenRef = useRef(false);
+  const audioOpenRef = useRef(false);
+  useEffect(() => { episodesOpenRef.current = episodesOpen; }, [episodesOpen]);
+  useEffect(() => { audioOpenRef.current = audioOpen; }, [audioOpen]);
 
   // ── Season/scroll effects (episodesOpen must be declared above these) ────
   // Reset season to the playing episode's season when panel opens
@@ -318,6 +355,14 @@ export function VideoPlayerScreen() {
   const volumeStart = useRef(1);
   const gestureHudTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideControlsTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Tracks whether this screen is still mounted — guards async callbacks (e.g.
+  // the auto-hide setTimeout) from touching the native player after it has been
+  // released on navigation away.
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
   /** Fires at most once per player mount — resets when active file changes. */
   const hasRecordedCompletionRef = useRef(false);
   /**
@@ -330,6 +375,14 @@ export function VideoPlayerScreen() {
   /** Minimum fraction of duration that must be actively played before a
    *  completion event is accepted. Set to 0.5 = 50 %. */
   const MIN_PLAY_FRACTION = 0.5;
+
+  // Reset completion/play counters on unmount so a remount starts fresh
+  useEffect(() => {
+    return () => {
+      hasRecordedCompletionRef.current = false;
+      activePlayedSecondsRef.current = 0;
+    };
+  }, []);
   const overlayOpacity = useSharedValue(0); // starts hidden — tap to reveal
   // Track height animates between thin (hidden) and bold (visible)
   const trackH = useSharedValue(2); // starts thin
@@ -338,9 +391,13 @@ export function VideoPlayerScreen() {
 
   const uri = activeFile?.uri || '';
 
-  // FIX: do NOT call p.play() in the initializer — let the status event handle it
-  // to avoid the orientation lock racing with the initial play call and pausing video.
-  const player = useVideoPlayer(uri, (p) => {
+  // Create the player ONCE with an empty source — never pass uri here.
+  // Passing uri causes expo-video to recreate the native player on every episode
+  // switch, which invalidates the old native handle and produces:
+  //   "The 1st argument cannot be cast to type VideoPlayer (received class Integer)"
+  // Instead we drive all source changes through player.replaceAsync() so the
+  // native player instance stays alive for the full lifetime of this screen.
+  const player = useVideoPlayer('', (p) => {
     p.loop = false;
   });
 
@@ -386,24 +443,23 @@ export function VideoPlayerScreen() {
     };
   }, [setSystemUiImmersive]);
 
-  // ── FIX: subscribe to player status → play as soon as video is ready ──────
-  // Track whether the episode was requested to auto-play (set by playEpisode).
-  // Declared here so it's available inside the statusChange listener below.
+  // ── Subscribe to player status → play as soon as video is ready ──────────
+  // autoPlayNextEp is set to true by the source-change effect before every
+  // replaceAsync call (initial load + episode switches).  We guard on it here
+  // so that a spurious readyToPlay event (e.g. after seek) doesn't force-play
+  // while the user has intentionally paused.
   const autoPlayNextEp = useRef(false);
   useEffect(() => {
     if (!player) return;
     const sub = player.addListener('statusChange', ({ status }) => {
-      if (status === 'readyToPlay') {
-        // Play if: this is the initial load (isPlaying starts false but we want autoplay),
-        // OR the user switched episodes with auto-play intent.
-        // We always auto-play on first ready — user can pause immediately if they prefer.
+      if (status === 'readyToPlay' && autoPlayNextEp.current) {
+        autoPlayNextEp.current = false;
         player.play();
         setIsPlaying(true);
-        autoPlayNextEp.current = false;
       }
     });
     return () => sub.remove();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   }, [player]);
 
   // ── Resume from saved position ─────────────────────────────────────────────
@@ -426,36 +482,54 @@ export function VideoPlayerScreen() {
     return () => { clearTimeout(t); clearTimeout(t2); };
   }, [player, uri]);
 
-  // ── Episode source change ──────────────────────────────────────────────────
+  // ── Episode source change (handles both initial load and episode switches) ──
+  // sourceReady is kept to debounce the initial empty-string → real URI transition.
   const sourceReady = useRef(false);
   useEffect(() => {
+    // Reset on unmount so a remount starts fresh
+    return () => { sourceReady.current = false; };
+  }, []);
+  useEffect(() => {
     if (!player || !uri) return;
-    if (!sourceReady.current) { sourceReady.current = true; return; }
     (async () => {
       try {
-        // Capture the auto-play intent before we reset state
-        const shouldPlay = isPlaying; // isPlaying was set to true by playEpisode
-        autoPlayNextEp.current = shouldPlay;
-        didSeekToStart.current = true;
-        startPositionRef.current = 0;
-        if (activeFile) {
-          const saved = await watchProgressService.get(progressMediaId, activeFile);
-          if (saved && saved.positionSeconds > 30) {
-            startPositionRef.current = saved.positionSeconds;
-            didSeekToStart.current = false;
+        // On the very first load sourceReady is false — treat same as an episode switch.
+        const isInitialLoad = !sourceReady.current;
+        sourceReady.current = true;
+
+        if (isInitialLoad) {
+          // First load: respect startPosition but do NOT force play yet;
+          // statusChange → readyToPlay will handle it.
+          autoPlayNextEp.current = true;
+          didSeekToStart.current = startPositionRef.current <= 0;
+        } else {
+          // Episode switch: capture auto-play intent, reset state.
+          const shouldPlay = isPlaying;
+          autoPlayNextEp.current = shouldPlay;
+          didSeekToStart.current = true;
+          startPositionRef.current = 0;
+          if (activeFile) {
+            const saved = await watchProgressService.get(progressMediaId, activeFile);
+            if (saved && saved.positionSeconds > 30) {
+              startPositionRef.current = saved.positionSeconds;
+              didSeekToStart.current = false;
+            }
           }
+          setCurrentTime(0);
+          setShowNextUp(false);
+          sliderMaxRef.current = 0;
+          sliderSeedRef.current = startPositionRef.current; // Initialize slider to resume position
+          setSliderResetKey((k) => k + 1);
+          hasRecordedCompletionRef.current = false;
+          activePlayedSecondsRef.current = 0;
         }
+
         await player.replaceAsync(uri);
-        // statusChange → readyToPlay will call play() when autoPlayNextEp is true.
-        // Reset UI state while we wait for the new source to be ready.
-        setCurrentTime(0);
-        setShowNextUp(false);
-        sliderMaxRef.current = 0;
-        sliderSeedRef.current = 0;
-        setSliderResetKey((k) => k + 1);
-        // Reset completion tracking so the new episode can also be recorded
-        hasRecordedCompletionRef.current = false;
-        activePlayedSecondsRef.current = 0;
+        // Mark as played when video loads
+        if (activeFile) {
+          void watchProgressService.markAsPlayed(progressMediaId, activeFile);
+        }
+        // statusChange → readyToPlay fires play() automatically.
       } catch (e) { console.warn('[Player] replace source failed', e); }
     })();
   }, [uri]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -529,6 +603,29 @@ export function VideoPlayerScreen() {
     return () => { ScreenOrientation.unlockAsync(); };
   }, []);
 
+  // ── Intercept ALL back navigation (button + hardware/gesture back) ────────
+  // This ensures portrait is restored and audio stops even when the user
+  // dismisses via the Android back gesture instead of the in-player button.
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('beforeRemove', () => {
+      // Cancel the auto-hide timer immediately — if it fires after the native
+      // player is released it throws "Cannot use shared object that was already released"
+      if (hideControlsTimeout.current) clearTimeout(hideControlsTimeout.current);
+      if (gestureHudTimeout.current) clearTimeout(gestureHudTimeout.current);
+      // Pause immediately so audio doesn't leak into the previous screen
+      try { player?.pause(); } catch { /* ignore */ }
+      // Persist progress on the way out
+      try {
+        if (player && activeFile) {
+          void persistProgress(player.currentTime, player.duration || 0);
+        }
+      } catch { /* ignore */ }
+      // Re-lock to portrait — runs before the screen is removed from the stack
+      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+    });
+    return unsubscribe;
+  }, [navigation, player, activeFile, persistProgress]);
+
   // ── Sync initial volume ───────────────────────────────────────────────────
   useEffect(() => {
     if (!player) return;
@@ -544,24 +641,31 @@ export function VideoPlayerScreen() {
       if (!isSeeking) setCurrentTime(t);
       setDuration(d);
       setIsPlaying(player.playing);
+      // Lock slider max once duration is first known — prevents native thumb jump
+      if (d > 0 && sliderMaxRef.current === 0) sliderMaxRef.current = d;
       if (nextEpisode && d > 0 && t >= d - 30 && t < d - 0.5) setShowNextUp(true);
     }, 250);
     return () => clearInterval(interval);
   }, [player, isSeeking, nextEpisode]);
 
-  // ── FIX: auto-hide only fires when actually playing ───────────────────────
+  // ── Auto-hide controls ────────────────────────────────────────────────────
   const scheduleHide = useCallback(() => {
     if (hideControlsTimeout.current) clearTimeout(hideControlsTimeout.current);
     hideControlsTimeout.current = setTimeout(() => {
-      // Re-read player.playing at fire time — never hide while paused
-      if (player?.playing && !episodesOpen && !audioOpen) {
+      // Guard: if the screen was unmounted (user navigated back) before this
+      // timer fired, the native player has been released — bail out immediately
+      // to avoid the "Cannot use shared object that was already released" crash.
+      if (!isMountedRef.current) return;
+      // Re-read player.playing at fire time — never hide while paused.
+      // Use refs for panel state so opening/closing panels doesn't reschedule this timer.
+      if (player?.playing && !episodesOpenRef.current && !audioOpenRef.current) {
         setShowControls(false);
         overlayOpacity.value = withTiming(0, { duration: 500 });
         trackH.value = withTiming(2, { duration: 500 });
         controlsPointer.value = 0;
       }
     }, HIDE_MS);
-  }, [player, overlayOpacity, trackH, controlsPointer, episodesOpen, audioOpen]);
+  }, [player, overlayOpacity, trackH, controlsPointer]);
 
   const revealControls = useCallback(() => {
     if (lockedRef.current) return;
@@ -601,7 +705,7 @@ export function VideoPlayerScreen() {
     }
   };
 
-  const skipBy = (delta: number) => {
+  const skipBy = useCallback((delta: number) => {
     if (!player || lockedRef.current) return;
     const wasPlaying = player.playing;
     const next = Math.max(0, Math.min(player.duration || 0, player.currentTime + delta));
@@ -618,7 +722,7 @@ export function VideoPlayerScreen() {
     if (showControlsRef.current) {
       scheduleHide();
     }
-  };
+  }, [player, teleportSlider, scheduleHide]);
 
   const hideGestureHudSoon = useCallback(() => {
     if (gestureHudTimeout.current) clearTimeout(gestureHudTimeout.current);
@@ -723,9 +827,8 @@ export function VideoPlayerScreen() {
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
-  const handleBack = async () => {
-    try { if (player && activeFile) await persistProgress(player.currentTime, player.duration || 0); } catch { /* ignore */ }
-    try { await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP); } catch { /* ignore */ }
+  const handleBack = () => {
+    // beforeRemove listener handles progress save, player pause, and portrait lock
     navigation.goBack();
   };
 
@@ -791,18 +894,18 @@ export function VideoPlayerScreen() {
   };
 
   // ── Derived ───────────────────────────────────────────────────────────────
-  // Lock slider max once — changing maximumValue mid-play causes the native
-  // slider to rescale and visually jump the thumb.
-  if (duration > 0 && sliderMaxRef.current === 0) sliderMaxRef.current = duration;
   const sliderMax = sliderMaxRef.current > 0 ? sliderMaxRef.current : 1;
   const scrubValue = isSeeking ? seekPreview : currentTime;
   const progressPct = duration > 0 ? Math.min(100, Math.max(0, (scrubValue / duration) * 100)) : 0;
   const padH = Math.max(insets.left, insets.right, 16);
   const padTop = Math.max(insets.top, 8);
   const padBot = Math.max(insets.bottom, 10);
-  const nextEpisodeLabel = nextEpisode
-    ? nextEpisode.episodeName?.trim() || (nextEpisode.episodeNumber != null ? `Episode ${nextEpisode.episodeNumber}` : epCode(nextEpisode) || 'Next')
-    : '';
+  const nextEpisodeLabel = useMemo(
+    () => nextEpisode
+      ? nextEpisode.episodeName?.trim() || (nextEpisode.episodeNumber != null ? `Episode ${nextEpisode.episodeNumber}` : epCode(nextEpisode) || 'Next')
+      : '',
+    [nextEpisode],
+  );
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -930,19 +1033,17 @@ export function VideoPlayerScreen() {
 
           {/* Action row */}
           <View style={styles.actionRow}>
-            {/* Prev episode — TV only, before Episodes */}
-            {item.type === 'tv' && prevEpisode ? (
+            {/* Previous episode */}
+            {prevEpisode ? (
               <Pressable style={styles.actionBtn} onPress={handlePrevEpisode}>
                 <SkipBack size={20} color="#ffffff" strokeWidth={1.8} fill="#ffffff" />
                 <Text style={styles.actionLabel} numberOfLines={1}>Prev episode</Text>
               </Pressable>
-            ) : item.type === 'tv' ? (
+            ) : (
               <View style={[styles.actionBtn, { opacity: 0.28 }]} pointerEvents="none">
                 <SkipBack size={20} color="#ffffff" strokeWidth={1.8} />
                 <Text style={styles.actionLabel} numberOfLines={1}>Prev episode</Text>
               </View>
-            ) : (
-              <View style={styles.actionBtn} pointerEvents="none" />
             )}
 
             {/* Episodes — TV only */}
@@ -1008,11 +1109,11 @@ export function VideoPlayerScreen() {
             exiting={SlideOutRight.duration(220)}
             style={[styles.sidePanel, { width: episodesPanelW }]}
           >
-            {/* Header — frosted glass bar */}
+            {/* Header — elevated so season dropdown paints above episode list */}
             <View style={[styles.panelHeaderWrap, { paddingTop: Math.max(insets.top, 16) }]}>
               <BlurView intensity={60} tint="dark" style={StyleSheet.absoluteFillObject} />
 
-              {/* Title row: "Episodes" + optional season pill + X */}
+              {/* Title row + close */}
               <View style={styles.panelHeaderInner}>
                 <View style={styles.panelHeaderText}>
                   <Text style={styles.panelTitle}>Episodes</Text>
@@ -1020,66 +1121,6 @@ export function VideoPlayerScreen() {
                     {initialItem.title.replace(/\s*-\s*S\d+E\d+.*$/i, '')}
                   </Text>
                 </View>
-
-                {/* Season pill — inline, only when multiple seasons exist */}
-                {seasonNumbers.length > 1 && (
-                  <View style={styles.seasonPillWrap}>
-                    <Pressable
-                      style={[styles.seasonPill, seasonDropdownOpen && styles.seasonPillOpen]}
-                      onPress={() => setSeasonDropdownOpen((v) => !v)}
-                      hitSlop={8}
-                    >
-                      <Text style={styles.seasonPillText}>
-                        {selectedSeason !== null ? `S${selectedSeason}` : 'All'}
-                      </Text>
-                      <ChevronDown
-                        size={12}
-                        color={seasonDropdownOpen ? '#ffffff' : '#a1a1aa'}
-                        strokeWidth={2.5}
-                        style={{ transform: [{ rotate: seasonDropdownOpen ? '180deg' : '0deg' }] }}
-                      />
-                    </Pressable>
-
-                    {/* Dropdown — absolutely positioned below the pill */}
-                    {seasonDropdownOpen && (
-                      <Animated.View entering={FadeIn.duration(140)} style={styles.seasonDropdownList}>
-                        {seasonNumbers.map((s) => {
-                          const isActive = s === selectedSeason;
-                          const epCount = episodes.filter((e) => e.seasonNumber === s).length;
-                          return (
-                            <Pressable
-                              key={s}
-                              style={({ pressed }) => [
-                                styles.seasonDropdownItem,
-                                isActive && styles.seasonDropdownItemActive,
-                                pressed && { opacity: 0.75 },
-                              ]}
-                              onPress={() => {
-                                setSelectedSeason(s);
-                                setSeasonDropdownOpen(false);
-                              }}
-                            >
-                              <View style={styles.seasonDropdownItemLeft}>
-                                {isActive && (
-                                  <View style={styles.seasonDropdownActiveDot} />
-                                )}
-                                <Text style={[
-                                  styles.seasonDropdownItemText,
-                                  isActive && styles.seasonDropdownItemTextActive,
-                                ]}>
-                                  Season {s}
-                                </Text>
-                              </View>
-                              <Text style={styles.seasonDropdownItemCount}>
-                                {epCount} ep{epCount !== 1 ? 's' : ''}
-                              </Text>
-                            </Pressable>
-                          );
-                        })}
-                      </Animated.View>
-                    )}
-                  </View>
-                )}
 
                 <Pressable
                   onPress={() => { setEpisodesOpen(false); setSeasonDropdownOpen(false); if (player?.playing) scheduleHide(); }}
@@ -1090,6 +1131,65 @@ export function VideoPlayerScreen() {
                 </Pressable>
               </View>
 
+              {/* Season picker — own row so dropdown can float over the list */}
+              {seasonNumbers.length > 1 && (
+                <View style={styles.seasonPillWrap}>
+                  <Pressable
+                    style={[styles.seasonPill, seasonDropdownOpen && styles.seasonPillOpen]}
+                    onPress={() => setSeasonDropdownOpen((v) => !v)}
+                    hitSlop={8}
+                  >
+                    <Text style={styles.seasonPillText}>
+                      {selectedSeason !== null ? `Season ${selectedSeason}` : 'All seasons'}
+                    </Text>
+                    <ChevronDown
+                      size={13}
+                      color={seasonDropdownOpen ? '#ffffff' : '#a1a1aa'}
+                      strokeWidth={2.5}
+                      style={{ transform: [{ rotate: seasonDropdownOpen ? '180deg' : '0deg' }] }}
+                    />
+                  </Pressable>
+
+                  {seasonDropdownOpen && (
+                    <Animated.View entering={FadeIn.duration(140)} style={styles.seasonDropdownList}>
+                      {seasonNumbers.map((s) => {
+                        const isActive = s === selectedSeason;
+                        const epCount = episodes.filter((e) => e.seasonNumber === s).length;
+                        return (
+                          <Pressable
+                            key={s}
+                            style={({ pressed }) => [
+                              styles.seasonDropdownItem,
+                              isActive && styles.seasonDropdownItemActive,
+                              pressed && { opacity: 0.75 },
+                            ]}
+                            onPress={() => {
+                              setSelectedSeason(s);
+                              setSeasonDropdownOpen(false);
+                            }}
+                          >
+                            <View style={styles.seasonDropdownItemLeft}>
+                              {isActive && <View style={styles.seasonDropdownActiveDot} />}
+                              <Text
+                                style={[
+                                  styles.seasonDropdownItemText,
+                                  isActive && styles.seasonDropdownItemTextActive,
+                                ]}
+                              >
+                                Season {s}
+                              </Text>
+                            </View>
+                            <Text style={styles.seasonDropdownItemCount}>
+                              {epCount} ep{epCount !== 1 ? 's' : ''}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </Animated.View>
+                  )}
+                </View>
+              )}
+
               <View style={styles.panelHeaderDivider} />
             </View>
 
@@ -1098,6 +1198,7 @@ export function VideoPlayerScreen() {
               style={styles.panelScroll}
               contentContainerStyle={[styles.panelScrollContent, { paddingBottom: Math.max(padBot, 24) + 12 }]}
               showsVerticalScrollIndicator={false}
+              onScrollBeginDrag={() => setSeasonDropdownOpen(false)}
             >
               {visibleEpisodes.length === 0 && (
                 <View style={styles.panelEmptyWrap}>
@@ -1107,6 +1208,7 @@ export function VideoPlayerScreen() {
               )}
               {visibleEpisodes.map((ep, i) => {
                 const active = activeFile && fileKey(ep) === fileKey(activeFile);
+                const isCompleted = completedEpisodes.has(fileKey(ep));
                 const displayName =
                   ep.episodeName?.trim() ||
                   (ep.episodeNumber != null ? `Episode ${ep.episodeNumber}` : epCode(ep) || `Episode ${i + 1}`);
@@ -1138,10 +1240,18 @@ export function VideoPlayerScreen() {
                           <Play size={14} color="#fff" fill="#fff" />
                         </View>
                         {active && <View style={styles.epActiveDot} />}
+                        {isCompleted && !active && (
+                          <View style={styles.epCompletedBadge}>
+                            <Check size={12} color="#4ade80" strokeWidth={2.5} />
+                          </View>
+                        )}
                       </View>
 
                       <View style={styles.epMeta}>
-                        <Text style={styles.epCode}>{code}{active ? '  ·  Now Playing' : ''}</Text>
+                        <Text style={styles.epCode}>
+                          {code}
+                          {active ? '  ·  Now Playing' : isCompleted ? '  ·  Watched' : ''}
+                        </Text>
                         <Text style={styles.epName} numberOfLines={2}>{displayName}</Text>
                       </View>
 
@@ -1417,8 +1527,10 @@ const styles = StyleSheet.create({
   },
   sideBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)' },
   sidePanel: {
-    flex: 1,                   // fills all remaining height — no percentage needed
-    maxWidth: 420,             // cap width so it doesn't go wider than episodesPanelW
+    // Width comes from inline style (episodesPanelW). Stretch full height only —
+    // do not use flex:1 on the main axis or the sheet grows too wide.
+    alignSelf: 'stretch',
+    maxWidth: 300,
     backgroundColor: '#0d0d0f',
     borderLeftWidth: 1,
     borderLeftColor: 'rgba(255,255,255,0.07)',
@@ -1428,15 +1540,18 @@ const styles = StyleSheet.create({
     shadowRadius: 24,
     shadowOffset: { width: -6, height: 0 },
     elevation: 20,
-    overflow: 'hidden',
+    // visible so season menu can overlap the list; list still clips its own content
+    overflow: 'visible',
   },
 
-  // Panel header — frosted glass bar
+  // Panel header — above the episode list (zIndex) so the season menu floats on top
   panelHeaderWrap: {
-    paddingHorizontal: 16,
-    paddingBottom: 14,
-    overflow: 'hidden',
+    paddingHorizontal: 14,
+    paddingBottom: 12,
+    overflow: 'visible',
     borderBottomWidth: 0,
+    zIndex: 40,
+    elevation: 40,
   },
   panelHeaderInner: {
     flexDirection: 'row',
@@ -1444,28 +1559,28 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 10,
   },
-  panelHeaderText: { flex: 1, gap: 3 },
+  panelHeaderText: { flex: 1, gap: 3, minWidth: 0 },
   panelTitle: {
-    color: '#ffffff', fontSize: 20, fontWeight: '800', letterSpacing: -0.3,
+    color: '#ffffff', fontSize: 17, fontWeight: '800', letterSpacing: -0.3,
   },
-  panelSubtitle: { color: '#52525b', fontSize: 12, fontWeight: '600' },
+  panelSubtitle: { color: '#52525b', fontSize: 11, fontWeight: '600' },
   panelCloseBtn: {
-    width: 30, height: 30, borderRadius: 15,
+    width: 28, height: 28, borderRadius: 14,
     backgroundColor: 'rgba(255,255,255,0.07)',
     borderWidth: 1, borderColor: 'rgba(255,255,255,0.09)',
     alignItems: 'center', justifyContent: 'center',
-    marginTop: 2,
+    marginTop: 1,
   },
   panelHeaderDivider: {
     height: 1,
     backgroundColor: 'rgba(255,255,255,0.07)',
-    marginTop: 14,
-    marginHorizontal: -16,
+    marginTop: 12,
+    marginHorizontal: -14,
   },
 
-  // Panel scroll
-  panelScroll: { flex: 1 },
-  panelScrollContent: { paddingHorizontal: 14, paddingTop: 14, paddingBottom: 24, gap: 8 },
+  // Panel scroll — under header so season dropdown covers it
+  panelScroll: { flex: 1, zIndex: 1, elevation: 0 },
+  panelScrollContent: { paddingHorizontal: 12, paddingTop: 12, paddingBottom: 24, gap: 6 },
 
   // Empty state
   panelEmptyWrap: {
@@ -1501,10 +1616,10 @@ const styles = StyleSheet.create({
   },
   epCardInner: {
     flexDirection: 'row', alignItems: 'center',
-    gap: 10, padding: 10,
+    gap: 8, padding: 8,
   },
   epStillWrap: {
-    width: 88, height: 50, borderRadius: 9,
+    width: 76, height: 44, borderRadius: 8,
     overflow: 'hidden', backgroundColor: '#27272a', flexShrink: 0,
     alignItems: 'center', justifyContent: 'center',
   },
@@ -1523,12 +1638,19 @@ const styles = StyleSheet.create({
     backgroundColor: NF_RED,
     borderWidth: 1, borderColor: 'rgba(0,0,0,0.4)',
   },
+  epCompletedBadge: {
+    position: 'absolute', bottom: 6, left: 6,
+    width: 22, height: 22, borderRadius: 11,
+    backgroundColor: 'rgba(74,222,128,0.2)',
+    borderWidth: 1.5, borderColor: '#4ade80',
+    alignItems: 'center', justifyContent: 'center',
+  },
   epMeta: { flex: 1, gap: 3 },
   epCode: {
     color: '#52525b', fontSize: 10, fontWeight: '800',
     textTransform: 'uppercase', letterSpacing: 0.5,
   },
-  epName: { color: '#e4e4e7', fontSize: 13, fontWeight: '700', lineHeight: 18 },
+  epName: { color: '#e4e4e7', fontSize: 12, fontWeight: '700', lineHeight: 16 },
 
   // ── Audio & Subtitles rows ─────────────────────────────────────────────────
   audioSectionLabel: {
@@ -1585,60 +1707,65 @@ const styles = StyleSheet.create({
   speedTileTextActive: { color: '#000000' },
 
   // ── Season picker (pill + dropdown) ───────────────────────────────────────
-  // The pill sits inline between the title block and the X button.
-  // The dropdown is absolutely positioned below the pill.
+  // Own row under the title; menu is absolute and elevated above the episode list.
   seasonPillWrap: {
     position: 'relative',
-    zIndex: 20, // dropdown must float above episode cards
+    alignSelf: 'flex-start',
+    marginTop: 10,
+    zIndex: 50,
+    elevation: 50,
   },
   seasonPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 20,
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 10,
     backgroundColor: 'rgba(255,255,255,0.08)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.12)',
   },
   seasonPillOpen: {
-    backgroundColor: 'rgba(229,9,20,0.15)',
-    borderColor: 'rgba(229,9,20,0.5)',
+    backgroundColor: 'rgba(229,9,20,0.18)',
+    borderColor: 'rgba(229,9,20,0.55)',
   },
   seasonPillText: {
     color: '#ffffff',
     fontSize: 12,
     fontWeight: '700',
-    letterSpacing: 0.2,
+    letterSpacing: 0.15,
   },
   seasonDropdownList: {
     position: 'absolute',
-    top: 36, // pill height + 4px gap
-    right: 0,
-    minWidth: 160,
-    backgroundColor: '#18181b',
+    top: '100%',
+    left: 0,
+    marginTop: 6,
+    minWidth: 168,
+    maxHeight: 240,
+    backgroundColor: '#141416',
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
+    borderColor: 'rgba(255,255,255,0.12)',
     overflow: 'hidden',
     shadowColor: '#000',
-    shadowOpacity: 0.6,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 16,
+    shadowOpacity: 0.75,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 48,
+    zIndex: 60,
   },
   seasonDropdownItem: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255,255,255,0.05)',
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255,255,255,0.06)',
   },
   seasonDropdownItemActive: {
-    backgroundColor: 'rgba(229,9,20,0.08)',
+    backgroundColor: 'rgba(229,9,20,0.12)',
   },
   seasonDropdownItemLeft: {
     flexDirection: 'row',
@@ -1661,7 +1788,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   seasonDropdownItemCount: {
-    color: '#3f3f46',
+    color: '#52525b',
     fontSize: 11,
     fontWeight: '600',
     fontVariant: ['tabular-nums'],

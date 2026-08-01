@@ -1,8 +1,7 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import {
   View,
   Text,
-  FlatList,
   Pressable,
   Image,
   StyleSheet,
@@ -37,6 +36,7 @@ import {
 import { useNavigation } from "@react-navigation/native";
 import { MediaItem } from "../types";
 import { FloatingHeader } from "./FloatingHeader";
+import { watchProgressService } from "../storage/watchProgressService";
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
 const GRID_ITEM_WIDTH = (SCREEN_WIDTH - 48 - 12) / 2; // 2-col grid with padding and gap
@@ -44,7 +44,7 @@ const GRID_ITEM_WIDTH = (SCREEN_WIDTH - 48 - 12) / 2; // 2-col grid with padding
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type FilterTab = "all" | "movie" | "tv" | "starred";
-type SortKey = "added" | "title" | "rating" | "year";
+type SortKey = "added" | "title" | "rating" | "year" | "lastPlayed";
 type ViewMode = "grid" | "list";
 type NavigationProp = any; // Simplify to any to support both Tab and Root stacks
 
@@ -63,6 +63,7 @@ interface LibraryViewProps {
 // ─── Sort options cycle ───────────────────────────────────────────────────────
 
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
+  { key: "lastPlayed", label: "Last Played" },
   { key: "added", label: "Recently Added" },
   { key: "title", label: "Title A–Z" },
   { key: "rating", label: "Top Rated" },
@@ -468,8 +469,30 @@ export function LibraryView({
   const [removeTarget, setRemoveTarget] = useState<MediaItem | null>(null);
   const [removePhase, setRemovePhase] = useState<"confirm" | "done">("confirm");
 
+  /** Track last played timestamps for sorting */
+  const [lastPlayedMap, setLastPlayedMap] = useState<Record<string, string | null>>({});
+
   const sortKey = SORT_OPTIONS[sortIdx].key;
   const sortLabel = SORT_OPTIONS[sortIdx].label;
+
+  // Fetch lastPlayedAt timestamps when items change or sort changes to lastPlayed
+  useEffect(() => {
+    if (sortKey !== 'lastPlayed') return;
+    
+    const fetchLastPlayed = async () => {
+      const map: Record<string, string | null> = {};
+      await Promise.all(
+        items.map(async (item) => {
+          const files = item.localFiles ?? (item.localFile ? [item.localFile] : []);
+          const lastPlayed = await watchProgressService.getLastPlayedAt(item.id, files);
+          map[item.id] = lastPlayed;
+        })
+      );
+      setLastPlayedMap(map);
+    };
+
+    void fetchLastPlayed();
+  }, [items, sortKey]);
 
   const handleDetails = (item: MediaItem) => {
     console.log(`LibraryView: Navigating to Details for: ${item.title} (ID: ${item.id})`);
@@ -503,9 +526,19 @@ export function LibraryView({
       if (sortKey === "rating") return b.rating - a.rating;
       if (sortKey === "year")
         return (b.releaseDate ?? "").localeCompare(a.releaseDate ?? "");
+      if (sortKey === "lastPlayed") {
+        const aPlayed = lastPlayedMap[a.id];
+        const bPlayed = lastPlayedMap[b.id];
+        // Items with no play history go to the end
+        if (!aPlayed && !bPlayed) return 0;
+        if (!aPlayed) return 1;
+        if (!bPlayed) return -1;
+        // Most recent first
+        return bPlayed.localeCompare(aPlayed);
+      }
       return 0; // 'added' — already newest-first from context
     });
-  }, [items, filter, sortKey]);
+  }, [items, filter, sortKey, lastPlayedMap]);
 
   const movies = items.filter((i) => i.type === "movie").length;
   const tvShows = items.filter((i) => i.type === "tv").length;

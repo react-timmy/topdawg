@@ -96,7 +96,7 @@ export function SearchScreen() {
           keyboardShouldPersistTaps="handled"
           ListEmptyComponent={
             query.length >= 2 ? (
-              <Text style={styles.emptyText}>No results for "{query}"</Text>
+              <Text style={styles.emptyText}>{`No results for "${query}"`}</Text>
             ) : (
               <Text style={styles.emptyText}>Start typing to search your library</Text>
             )

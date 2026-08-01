@@ -13,7 +13,7 @@
  *   Phase C (800–1400ms): Badge icon springs in, confetti rains, text slides up
  *   Phase D: Tap anywhere or auto-dismiss after 5 s
  */
-import React, { useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useRef } from 'react';
 import {
   View,
   Text,

@@ -103,4 +103,48 @@ export const watchProgressService = {
     delete all[progressKey(mediaId, file)];
     await writeAll(all);
   },
+
+  /** Mark media as played now (sets lastPlayedAt timestamp) */
+  async markAsPlayed(mediaId: string, file: Pick<LocalFile, 'uri' | 'filename'>): Promise<void> {
+    const all = await readAll();
+    const key = progressKey(mediaId, file);
+    const existing = all[key];
+
+    if (existing) {
+      // Update existing progress with lastPlayedAt
+      all[key] = {
+        ...existing,
+        lastPlayedAt: new Date().toISOString(),
+      };
+    } else {
+      // Create minimal progress entry just to track last played
+      all[key] = {
+        mediaId,
+        fileUri: file.uri,
+        filename: file.filename,
+        positionSeconds: 0,
+        durationSeconds: 0,
+        updatedAt: new Date().toISOString(),
+        lastPlayedAt: new Date().toISOString(),
+      };
+    }
+    await writeAll(all);
+  },
+
+  /** Get the most recent lastPlayedAt timestamp for a media item across all its files */
+  async getLastPlayedAt(mediaId: string, files: LocalFile[]): Promise<string | null> {
+    if (files.length === 0) return null;
+    const all = await readAll();
+    let latestPlayedAt: string | null = null;
+
+    for (const file of files) {
+      const p = all[progressKey(mediaId, file)];
+      if (p?.lastPlayedAt) {
+        if (!latestPlayedAt || p.lastPlayedAt > latestPlayedAt) {
+          latestPlayedAt = p.lastPlayedAt;
+        }
+      }
+    }
+    return latestPlayedAt;
+  },
 };

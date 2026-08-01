@@ -1,0 +1,51 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "1. Add `posterUrl` to `DisambiguationOption` type and pass it through in `askUser`": [
+      {
+        "executionId": "adedc137-29c4-4f5a-8023-7216a336dab1",
+        "chatSessionId": "sess_69d11a7b-97e0-4040-b57b-af26a62ea9c2",
+        "timestamp": 1785473098416
+      },
+      {
+        "executionId": "adedc137-29c4-4f5a-8023-7216a336dab1",
+        "chatSessionId": "sess_69d11a7b-97e0-4040-b57b-af26a62ea9c2",
+        "timestamp": 1785473112920
+      },
+      {
+        "executionId": "adedc137-29c4-4f5a-8023-7216a336dab1",
+        "chatSessionId": "sess_69d11a7b-97e0-4040-b57b-af26a62ea9c2",
+        "timestamp": 1785473169009
+      }
+    ],
+    "2. Replace the disambiguation modal JSX with the new bottom-sheet poster-card design": [
+      {
+        "executionId": "adedc137-29c4-4f5a-8023-7216a336dab1",
+        "chatSessionId": "sess_69d11a7b-97e0-4040-b57b-af26a62ea9c2",
+        "timestamp": 1785473099042
+      },
+      {
+        "executionId": "adedc137-29c4-4f5a-8023-7216a336dab1",
+        "chatSessionId": "sess_69d11a7b-97e0-4040-b57b-af26a62ea9c2",
+        "timestamp": 1785473174558
+      },
+      {
+        "executionId": "adedc137-29c4-4f5a-8023-7216a336dab1",
+        "chatSessionId": "sess_69d11a7b-97e0-4040-b57b-af26a62ea9c2",
+        "timestamp": 1785473325389
+      }
+    ],
+    "3. Replace the old disambiguation modal styles with the new bottom-sheet styles": [
+      {
+        "executionId": "adedc137-29c4-4f5a-8023-7216a336dab1",
+        "chatSessionId": "sess_69d11a7b-97e0-4040-b57b-af26a62ea9c2",
+        "timestamp": 1785473099460
+      },
+      {
+        "executionId": "adedc137-29c4-4f5a-8023-7216a336dab1",
+        "chatSessionId": "sess_69d11a7b-97e0-4040-b57b-af26a62ea9c2",
+        "timestamp": 1785473336125
+      }
+    ]
+  }
+}

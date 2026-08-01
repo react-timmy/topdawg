@@ -14,7 +14,6 @@ import {
   Platform,
 } from "react-native";
 import { BlurView } from "expo-blur";
-import { LinearGradient } from "expo-linear-gradient";
 import {
   Search,
   X,
@@ -25,12 +24,14 @@ import {
   HelpCircle,
   ChevronRight,
 } from "lucide-react-native";
-import Animated, { FadeIn, FadeInDown, Layout } from "react-native-reanimated";
+import Animated, { FadeInDown, Layout } from "react-native-reanimated";
 
 import { LocalFile, MediaItem } from "../types";
 import { tmdbService } from "../services/tmdbService";
 import { animeService } from "../services/animeService";
 import { geminiAIService } from "../services/geminiAIService";
+import { usePro } from "../context/ProContext";
+import { fileLabel } from "../services/fileOrganizeService";
 
 const { height: SCREEN_HEIGHT } = Dimensions.get("window");
 
@@ -45,6 +46,7 @@ export function UnmatchedFilesList({
   onMatchSuccess,
   onIgnore,
 }: UnmatchedFilesListProps) {
+  const { isPro } = usePro();
   const [selectedFile, setSelectedFile] = useState<LocalFile | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchType, setSearchType] = useState<"movie" | "tv">("movie");
@@ -70,7 +72,9 @@ export function UnmatchedFilesList({
         setLoading(true);
         let initialQuery = "";
         try {
-          const parsed = await geminiAIService.parseSingleFilename(selectedFile.filename);
+          const parsed = await geminiAIService.parseSingleFilename(selectedFile.filename, {
+            isPro,
+          });
           if (parsed && parsed.title) {
             initialQuery = parsed.title;
           }
@@ -156,7 +160,11 @@ function parseSeasonEpisode(filename: string): { season: number | null; episode:
       if (item.type === 'tv') {
         let parsed = parseSeasonEpisode(selectedFile.filename);
         try {
-          const aiParsed = await geminiAIService.parseEpisodeWithContext(selectedFile.filename, item.title);
+          const aiParsed = await geminiAIService.parseEpisodeWithContext(
+            selectedFile.filename,
+            item.title,
+            { isPro },
+          );
           if (aiParsed.season !== null && aiParsed.episode !== null) {
             parsed = {
               season: aiParsed.season,
@@ -197,7 +205,7 @@ function parseSeasonEpisode(filename: string): { season: number | null; episode:
       onMatchSuccess(selectedFile, fullyMatchedItem);
       Alert.alert("Success", `"${fullyMatchedItem.title}" matched successfully!`);
       setSelectedFile(null);
-    } catch (e) {
+    } catch {
       Alert.alert("Error", "Failed to retrieve full item metadata.");
     } finally {
       setLoading(false);
@@ -231,7 +239,7 @@ function parseSeasonEpisode(filename: string): { season: number | null; episode:
               <HelpCircle size={20} color="#71717a" style={styles.fileIcon} />
               <View style={styles.fileInfo}>
                 <Text style={styles.filename} numberOfLines={2}>
-                  {item.filename}
+                  {fileLabel(item)}
                 </Text>
                 <Text style={styles.fileUri} numberOfLines={1}>
                   {item.uri}
@@ -286,7 +294,7 @@ function parseSeasonEpisode(filename: string): { season: number | null; episode:
             <View style={styles.modalSubtitleBlock}>
               <Text style={styles.modalSubLabel}>File to match:</Text>
               <Text style={styles.modalSubtitle} numberOfLines={2}>
-                {selectedFile.filename}
+                {fileLabel(selectedFile)}
               </Text>
             </View>
           )}

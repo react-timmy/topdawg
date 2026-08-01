@@ -1,13 +1,13 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect, useMemo } from "react";
 import { View, Text, StyleSheet, ActivityIndicator, FlatList, RefreshControl, Pressable } from "react-native";
 import { useNavigation, useFocusEffect } from "@react-navigation/native";
 import { storageService } from "../storage/asyncStorage";
 import { MediaItem } from "../types";
 import { MediaCard } from "../components/MediaCard";
 import { FloatingHeader } from "../components/FloatingHeader";
-import { useSharedValue } from "react-native-reanimated";
+import Animated, { useSharedValue , FadeIn } from "react-native-reanimated";
 import { Film, ScanLine } from "lucide-react-native";
-import Animated, { FadeIn } from "react-native-reanimated";
+import { watchProgressService } from "../storage/watchProgressService";
 
 function MoviesEmptyState() {
   const navigation = useNavigation<any>();
@@ -36,6 +36,7 @@ export function MoviesScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [headerHeight, setHeaderHeight] = useState(0);
+  const [lastPlayedMap, setLastPlayedMap] = useState<Record<string, string | null>>({});
   const navigation = useNavigation<any>();
   const scrollY = useSharedValue(0);
 
@@ -53,6 +54,39 @@ export function MoviesScreen() {
     }, [loadData])
   );
 
+  // Fetch lastPlayedAt timestamps when items change
+  useEffect(() => {
+    if (items.length === 0) return;
+    
+    const fetchLastPlayed = async () => {
+      const map: Record<string, string | null> = {};
+      await Promise.all(
+        items.map(async (item) => {
+          const files = item.localFiles ?? (item.localFile ? [item.localFile] : []);
+          const lastPlayed = await watchProgressService.getLastPlayedAt(item.id, files);
+          map[item.id] = lastPlayed;
+        })
+      );
+      setLastPlayedMap(map);
+    };
+
+    void fetchLastPlayed();
+  }, [items]);
+
+  // Sort items by last played (most recent first)
+  const sortedItems = useMemo(() => {
+    return [...items].sort((a, b) => {
+      const aPlayed = lastPlayedMap[a.id];
+      const bPlayed = lastPlayedMap[b.id];
+      // Items with no play history go to the end
+      if (!aPlayed && !bPlayed) return 0;
+      if (!aPlayed) return 1;
+      if (!bPlayed) return -1;
+      // Most recent first
+      return bPlayed.localeCompare(aPlayed);
+    });
+  }, [items, lastPlayedMap]);
+
   const onRefresh = () => {
     setRefreshing(true);
     loadData();
@@ -69,10 +103,10 @@ export function MoviesScreen() {
   return (
     <View style={styles.container}>
       <FlatList
-        data={items}
+        data={sortedItems}
         keyExtractor={(item) => item.id}
         renderItem={({ item, index }) => <MediaCard item={item} index={index} />}
-        contentContainerStyle={[styles.list, { paddingTop: headerHeight + 8 }]}
+        contentContainerStyle={[styles.list, { paddingTop: headerHeight + 24 }]}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#ffffff" />
         }

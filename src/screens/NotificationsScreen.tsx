@@ -9,7 +9,7 @@ import {
   RefreshControl,
 } from 'react-native';
 import { useNavigation, useFocusEffect, useRoute, RouteProp } from '@react-navigation/native';
-import { RootStackParamList } from '../types';
+import { RootStackParamList , UpcomingItem } from '../types';
 import { BlurView } from 'expo-blur';
 import {
   ChevronLeft,
@@ -23,7 +23,6 @@ import {
   BellOff,
   Clapperboard,
   Gift,
-  Star,
 } from 'lucide-react-native';
 import Animated, {
   FadeIn,
@@ -44,7 +43,6 @@ import {
 import { UpcomingCard } from '../components/UpcomingCard';
 import { storageService } from '../storage/asyncStorage';
 import { tmdbService } from '../services/tmdbService';
-import { UpcomingItem } from '../types';
 import { useBadgeUnlock } from '../context/BadgeUnlockContext';
 
 type TabKey = 'inbox' | 'upcoming';

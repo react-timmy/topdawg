@@ -7,9 +7,12 @@
  * Lifecycle:
  *  1. Mount: reads stored account, subscribes to Firebase auth state.
  *  2. If account + sync_pending → retryPendingSync in background.
- *  3. Registers setOnEventWritten so every local watch event is pushed to Firestore.
- *  4. signIn(): Google Sign-In → initialSync (non-blocking) → startListener.
- *  5. signOut(): tears down listener, clears account, removes event hook.
+ *  3. Registers push hooks:
+ *       - setOnEventWritten  → pushes every new WatchEvent to Firestore
+ *       - setOnProfileSaved  → pushes profile edits to Firestore
+ *       - setOnPosterResolved → pushes poster cache entries to Firestore
+ *  4. signIn(): Google Sign-In → initialSync (profile + memories + history) → startListener.
+ *  5. signOut(): tears down listener, clears account, removes all push hooks.
  */
 
 import React, {
@@ -22,8 +25,9 @@ import React, {
 } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { authService, FilmSortAccount } from '../services/authService';
-import { syncService } from '../services/syncService';
-import { setOnEventWritten } from '../storage/watchHistoryService';
+import { syncService, PosterEntry } from '../services/syncService';
+import { setOnEventWritten, setOnPosterResolved } from '../storage/watchHistoryService';
+import { setOnProfileSaved } from '../storage/profileService';
 import { ENABLE_CLOUD_SYNC } from '../config/env';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -77,6 +81,37 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
+  // ── Register / deregister the profile push hook ──────────────────────────────
+  const registerProfileHook = useCallback((uid: string | null) => {
+    if (!ENABLE_CLOUD_SYNC || !uid) {
+      setOnProfileSaved(null);
+      return;
+    }
+    setOnProfileSaved((profile) => {
+      void syncService.pushProfile(uid, profile);
+    });
+  }, []);
+
+  // ── Register / deregister the poster push hook ──────────────────────────────
+  const registerPosterHook = useCallback((uid: string | null) => {
+    if (!ENABLE_CLOUD_SYNC || !uid) {
+      setOnPosterResolved(null);
+      return;
+    }
+    setOnPosterResolved((event) => {
+      if (!event.posterUrl) return;
+      const entry: PosterEntry = {
+        mediaId: event.mediaId,
+        title: event.title,
+        type: event.type,
+        posterUrl: event.posterUrl,
+        firstWatchedAt: event.watchedAt,
+        updatedAt: event.watchedAt,
+      };
+      void syncService.pushPoster(uid, entry);
+    });
+  }, []);
+
   // ── Mount: read stored account + subscribe to Firebase auth state ───────────
   useEffect(() => {
     let cancelled = false;
@@ -90,6 +125,8 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
 
       if (stored) {
         registerEventHook(stored.uid);
+        registerProfileHook(stored.uid);
+        registerPosterHook(stored.uid);
 
         // Check for pending sync from last session
         const pending = await AsyncStorage.getItem(SYNC_PENDING_KEY);
@@ -114,6 +151,8 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
         // Firebase session expired — clear local state
         setAccount(null);
         registerEventHook(null);
+        registerProfileHook(null);
+        registerPosterHook(null);
         listenerUnsubRef.current?.();
         listenerUnsubRef.current = null;
       }
@@ -136,6 +175,8 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
 
     setAccount(newAccount);
     registerEventHook(newAccount.uid);
+    registerProfileHook(newAccount.uid);
+    registerPosterHook(newAccount.uid);
 
     // Initial sync — non-blocking; update isSyncing around it
     setIsSyncing(true);
@@ -153,7 +194,7 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
     // Start real-time listener
     listenerUnsubRef.current?.();
     listenerUnsubRef.current = syncService.startListener(newAccount.uid);
-  }, [registerEventHook]);
+  }, [registerEventHook, registerProfileHook, registerPosterHook]);
 
   // ── signOut ────────────────────────────────────────────────────────────────
   const signOut = useCallback(async () => {
@@ -161,8 +202,10 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
     listenerUnsubRef.current?.();
     listenerUnsubRef.current = null;
 
-    // Remove event push hook
+    // Remove all push hooks
     setOnEventWritten(null);
+    setOnProfileSaved(null);
+    setOnPosterResolved(null);
 
     // Firebase + Google sign-out + clear stored account
     await authService.signOut();

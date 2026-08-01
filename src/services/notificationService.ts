@@ -60,15 +60,17 @@ function parseReleaseDate(dateString: string): Date {
 
 // ─── Schedule a reminder for an upcoming item ────────────────────────────────
 
-export async function scheduleUpcomingNotification(item: UpcomingItem): Promise<string[]> {
+export async function scheduleUpcomingNotification(
+  item: UpcomingItem,
+): Promise<{ ids: string[]; reason?: 'no_permission' | 'already_released' }> {
   const granted = await requestPermissions();
-  if (!granted) return [];
+  if (!granted) return { ids: [], reason: 'no_permission' };
 
   const releaseDate = parseReleaseDate(item.releaseDate);
   const now = new Date();
 
   // Don't schedule if release is already past
-  if (releaseDate <= now) return [];
+  if (releaseDate <= now) return { ids: [], reason: 'already_released' };
 
   // Notify a few hours before release date/time
   const trigger = new Date(releaseDate.getTime() - HOURS_BEFORE_RELEASE * 60 * 60 * 1000);
@@ -80,7 +82,7 @@ export async function scheduleUpcomingNotification(item: UpcomingItem): Promise<
       : new Date(now.getTime() + 30 * 1000);
 
   // Skip if release is already over by the time we'd fire
-  if (fireAt >= releaseDate && releaseDate <= now) return [];
+  if (fireAt >= releaseDate && releaseDate <= now) return { ids: [], reason: 'already_released' };
 
   const isEpisode = item.type === 'episode';
   const hoursLabel = `${HOURS_BEFORE_RELEASE} hours`;
@@ -107,9 +109,9 @@ export async function scheduleUpcomingNotification(item: UpcomingItem): Promise<
         date: fireAt,
       },
     });
-    return [id];
+    return { ids: [id] };
   } catch {
-    return [];
+    return { ids: [] };
   }
 }
 

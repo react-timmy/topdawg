@@ -4,18 +4,183 @@
  * Uses the @google/genai SDK with the Gemma 4 31B model via the Gemini API.
  * Automatically falls back to gemma-4-26b-a4b-it on quota errors (429).
  *
+ * Key lanes:
+ *   Free  — rotates GEMINI_API_KEYS; when all are cooling down, waits ~60s (queue UI)
+ *   Pro   — dedicated GEMINI_PRO_API_KEY ("Skip the Line"); never shared with free users
+ *
  * Fast path:
  *   1. Cache hits (instant)
  *   2. High-confidence local parse (AnimePahe / YTS / scene names) — no API
- *   3. Single Gemini batch for the rest (progress callbacks keep UI alive)
+ *   3. Gemini batch for the rest (progress callbacks keep UI alive)
  */
 
 import { GoogleGenAI } from '@google/genai';
 import { resolveIsAnime } from '../utils/mediaHints';
 import { parseLocalFilename } from '../utils/localFilenameParser';
 import { sourcesForPrompt } from '../utils/releaseSources';
-import { GEMINI_API_KEY, GEMINI_MODELS } from '../config/env';
+import {
+  GEMINI_API_KEYS,
+  GEMINI_MODELS,
+  GEMINI_PRO_API_KEY,
+} from '../config/env';
 import { bulkGetCached, bulkSetCached } from '../storage/aiParseCache';
+
+const KEY_COOLDOWN_MS = 60_000;
+
+type KeyLane = 'free' | 'pro';
+
+class KeyManager {
+  private freeKeys = GEMINI_API_KEYS;
+  private proKey = GEMINI_PRO_API_KEY;
+  private exhaustTimes = new Map<string, number>();
+
+  /** Pro VIP key when set; otherwise free pool (dev / single-key setups). */
+  private pool(isPro: boolean): { keys: string[]; lane: KeyLane } {
+    if (isPro && this.proKey) {
+      return { keys: [this.proKey], lane: 'pro' };
+    }
+    return { keys: this.freeKeys, lane: 'free' };
+  }
+
+  async getAvailableKey(
+    isPro: boolean,
+    onQueue?: (lane: KeyLane) => void,
+  ): Promise<{ key: string; lane: KeyLane }> {
+    const { keys, lane } = this.pool(isPro);
+    if (keys.length === 0) {
+      throw new Error(
+        isPro
+          ? 'No Gemini keys configured (set GEMINI_PRO_API_KEY or GEMINI_API_KEY)!'
+          : 'No Gemini free-tier keys configured!',
+      );
+    }
+
+    while (true) {
+      const now = Date.now();
+      let minWait = Infinity;
+
+      for (const key of keys) {
+        const exhaustedUntil = this.exhaustTimes.get(key) || 0;
+        if (now >= exhaustedUntil) {
+          return { key, lane };
+        }
+        const waitTime = exhaustedUntil - now;
+        if (waitTime < minWait) minWait = waitTime;
+      }
+
+      onQueue?.(lane);
+      const waitSec = Math.ceil(minWait / 1000);
+      console.log(
+        `[Queue System] ${lane === 'pro' ? 'Pro VIP' : 'Free'} lane exhausted. Waiting ${waitSec}s…`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, Math.max(minWait, 250)));
+    }
+  }
+
+  markExhausted(key: string) {
+    console.warn(
+      `[Queue System] Key ending in …${key.slice(-4)} rate-limited. Cooling down for ${KEY_COOLDOWN_MS / 1000}s.`,
+    );
+    this.exhaustTimes.set(key, Date.now() + KEY_COOLDOWN_MS);
+  }
+}
+
+const keyManager = new KeyManager();
+
+function isQuotaError(error: unknown): boolean {
+  const err = error as { status?: number; statusCode?: number; code?: number | string; message?: string };
+  const status = err?.status ?? err?.statusCode ?? err?.code;
+  const msg = String(err?.message ?? error ?? '').toLowerCase();
+  return (
+    status === 429 ||
+    msg.includes('quota') ||
+    msg.includes('rate limit') ||
+    msg.includes('resource_exhausted')
+  );
+}
+
+export type GeminiCallOptions = {
+  /** When true, prefer the Pro VIP key (Skip the Line). */
+  isPro?: boolean;
+  /** Fired while waiting for a cool-down key (free queue or Pro VIP retry). */
+  onQueue?: (lane: KeyLane) => void;
+};
+
+type GenerateContentParams = GeminiCallOptions & {
+  contents: string;
+  systemInstruction?: string;
+  temperature?: number;
+  maxOutputTokens?: number;
+  responseMimeType?: string;
+};
+
+/**
+ * Shared Gemini call: key rotation + model fallback + 429 cooldown.
+ * Returns response text, or null if all attempts fail.
+ */
+async function generateContentWithKeys(
+  params: GenerateContentParams,
+): Promise<string | null> {
+  const isPro = params.isPro === true;
+  let lastError: unknown;
+
+  // Bound retries so we never spin forever if something odd happens
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const { key, lane } = await keyManager.getAvailableKey(isPro, params.onQueue);
+    const ai = new GoogleGenAI({ apiKey: key });
+    let quotaOnThisKey = false;
+
+    for (const model of GEMINI_MODELS) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: params.contents,
+          config: {
+            ...(params.systemInstruction
+              ? { systemInstruction: params.systemInstruction }
+              : {}),
+            temperature: params.temperature ?? 0.1,
+            maxOutputTokens: params.maxOutputTokens ?? 2048,
+            ...(params.responseMimeType
+              ? { responseMimeType: params.responseMimeType }
+              : {}),
+          },
+        });
+
+        const content = response.text?.trim() ?? '';
+        if (content) {
+          if (model !== GEMINI_MODELS[0]) {
+            console.log(`[GeminiAI] Used fallback model: ${model} (${lane} lane)`);
+          }
+          return content;
+        }
+        console.warn(`[GeminiAI] Empty response from ${model} (${lane})`);
+      } catch (error: unknown) {
+        lastError = error;
+        if (isQuotaError(error)) {
+          console.warn(
+            `[GeminiAI] ${model} quota on key …${key.slice(-4)} (${lane}) — rotating`,
+          );
+          keyManager.markExhausted(key);
+          quotaOnThisKey = true;
+          break; // next key / wait
+        }
+        console.error(`[GeminiAI] Request failed (${model}):`, error);
+        return null;
+      }
+    }
+
+    if (!quotaOnThisKey) {
+      // Empty responses across models, not a rate-limit — stop
+      break;
+    }
+  }
+
+  if (lastError) {
+    console.error('[GeminiAI] All keys/models exhausted. Last error:', lastError);
+  }
+  return null;
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -213,66 +378,38 @@ function localToParsed(local: NonNullable<ReturnType<typeof parseLocalFilename>>
 
 async function parseBatch(
   filenames: string[],
-  ai: GoogleGenAI,
+  options?: GeminiCallOptions,
 ): Promise<BatchParseResult> {
-  let lastError: unknown;
+  try {
+    const content = await generateContentWithKeys({
+      isPro: options?.isPro,
+      onQueue: options?.onQueue,
+      contents: `Parse these filenames and use each filename EXACTLY as the key:\n${JSON.stringify(filenames)}`,
+      systemInstruction: SYSTEM_PROMPT,
+      temperature: 0.1,
+      maxOutputTokens: 16384,
+      responseMimeType: 'application/json',
+    });
 
-  for (const model of GEMINI_MODELS) {
-    try {
-      const response = await ai.models.generateContent({
-        model,
-        contents: `Parse these filenames and use each filename EXACTLY as the key:\n${JSON.stringify(filenames)}`,
-        config: {
-          systemInstruction: SYSTEM_PROMPT,
-          temperature: 0.1,
-          maxOutputTokens: 16384,
-          responseMimeType: 'application/json',
-        },
-      });
-
-      const content = response.text;
-      if (!content) {
-        console.warn(`[GeminiAI] Empty response from ${model}`);
-        return { results: {}, failed: [...filenames] };
-      }
-
-      const parsed = parseModelJson(content);
-      const rawResults: Record<string, any> =
-        parsed?.results ??
-        parsed?.data ??
-        (parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {});
-      const batchResult = parseResponseIntoResults(filenames, rawResults);
-
-      if (model !== GEMINI_MODELS[0]) {
-        console.log(`[GeminiAI] Parsed using fallback model: ${model}`);
-      }
-
-      return batchResult;
-    } catch (error: any) {
-      const status = error?.status ?? error?.statusCode ?? error?.code;
-      const isQuota =
-        status === 429 ||
-        String(error?.message ?? '').toLowerCase().includes('quota') ||
-        String(error?.message ?? '').toLowerCase().includes('rate limit');
-
-      if (isQuota) {
-        console.warn(`[GeminiAI] ${model} quota exhausted, trying next model…`);
-        lastError = error;
-        continue;
-      }
-
-      console.error('[GeminiAI] Batch parse failed:', error);
+    if (!content) {
       return { results: {}, failed: [...filenames] };
     }
-  }
 
-  console.error('[GeminiAI] All models exhausted. Last error:', lastError);
-  return { results: {}, failed: [...filenames] };
+    const parsed = parseModelJson(content);
+    const rawResults: Record<string, any> =
+      parsed?.results ??
+      parsed?.data ??
+      (parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {});
+    return parseResponseIntoResults(filenames, rawResults);
+  } catch (error) {
+    console.error('[GeminiAI] Batch parse failed:', error);
+    return { results: {}, failed: [...filenames] };
+  }
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-export type BatchParseOptions = {
+export type BatchParseOptions = GeminiCallOptions & {
   /** When false, skip Gemini and use cache + local only (free-tier exhausted). */
   allowGemini?: boolean;
   /** Cap how many uncached low-confidence names may hit Gemini (free tier). */
@@ -294,6 +431,7 @@ export async function batchParseFilenames(
 
   const allowGemini = options?.allowGemini !== false;
   const maxAiFiles = options?.maxAiFiles;
+  const isPro = options?.isPro === true;
   const total = filenames.length;
   const report = (p: Omit<AiParseProgress, 'total'> & { total?: number }) => {
     onProgress?.({ total, ...p });
@@ -390,7 +528,6 @@ export async function batchParseFilenames(
   const aiRequested = allowGemini ? needAi.length : 0;
 
   if (allowGemini && needAi.length > 0) {
-    const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
     const batches: string[][] = [];
     for (let i = 0; i < needAi.length; i += BATCH_SIZE) {
       batches.push(needAi.slice(i, i + BATCH_SIZE));
@@ -426,7 +563,24 @@ export async function batchParseFilenames(
         parsed: cachedCount + Object.keys(allNewResults).length,
       });
 
-      const batchResult = await parseBatch(batch, ai);
+      const batchResult = await parseBatch(batch, {
+        isPro,
+        onQueue: (lane) => {
+          report({
+            stage: 'waiting',
+            message:
+              lane === 'pro'
+                ? 'Pro priority lane busy — retrying shortly…'
+                : 'High traffic! You are in queue. Scanning will begin shortly…',
+            cached: cachedCount,
+            local: Object.keys(localResults).length,
+            sending: batch.length,
+            batchIndex: i + 1,
+            batchCount: batches.length,
+            parsed: cachedCount + Object.keys(allNewResults).length,
+          });
+        },
+      });
       Object.assign(allNewResults, batchResult.results);
       allFailed.push(...batchResult.failed);
 
@@ -485,17 +639,21 @@ export async function batchParseFilenames(
 
 export async function parseSingleFilename(
   filename: string,
+  callOptions?: GeminiCallOptions,
 ): Promise<ParsedFilename | null> {
-  const result = await batchParseFilenames([filename]);
+  const result = await batchParseFilenames([filename], undefined, {
+    isPro: callOptions?.isPro,
+    onQueue: callOptions?.onQueue,
+  });
   return result.results[filename] ?? null;
 }
 
 export async function parseEpisodeWithContext(
   filename: string,
-  showTitle: string
+  showTitle: string,
+  callOptions?: GeminiCallOptions,
 ): Promise<{ season: number | null; episode: number | null; episodeName?: string }> {
   try {
-    const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
     const systemPrompt = `You are a TV episode parser.
 Extract the season number, episode number, and episode title (if present in the filename).
 Do not guess the episode title from external knowledge, only extract it if it's explicitly written in the filename (after the season/episode markers).
@@ -503,46 +661,31 @@ If it's an anime with absolute numbering (e.g. - 14), season is 1, episode is 14
 Output ONLY valid JSON with no markdown formatting.
 Schema: {"season": number|null, "episode": number|null, "episodeName": string|null}`;
 
-    const prompt = `The user has a file named: "${filename}"
-This file belongs to the TV show: "${showTitle}"`;
-
-    let content = '';
-    let lastError: any = null;
-    for (const model of GEMINI_MODELS) {
-      try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: prompt,
-          config: {
-            systemInstruction: systemPrompt,
-            temperature: 0.1,
-            maxOutputTokens: 256,
-            responseMimeType: 'application/json',
-          },
-        });
-        content = response.text || '';
-        if (content) break;
-      } catch (err: any) {
-        lastError = err;
-        const status = err?.status ?? err?.statusCode ?? err?.code;
-        if (status === 429 || String(err?.message ?? '').toLowerCase().includes('quota')) {
-          continue;
-        }
-        break;
-      }
-    }
+    const content = await generateContentWithKeys({
+      isPro: callOptions?.isPro,
+      onQueue: callOptions?.onQueue,
+      contents: `The user has a file named: "${filename}"
+This file belongs to the TV show: "${showTitle}"`,
+      systemInstruction: systemPrompt,
+      temperature: 0.1,
+      maxOutputTokens: 256,
+      responseMimeType: 'application/json',
+    });
 
     if (!content) {
       console.warn('[GeminiAI] Empty response in parseEpisodeWithContext. Returning default.');
       return { season: null, episode: null };
     }
 
-    let text = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    const text = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
     const parsed = JSON.parse(text);
     return {
       season: typeof parsed.season === 'number' ? parsed.season : null,
       episode: typeof parsed.episode === 'number' ? parsed.episode : null,
-      episodeName: typeof parsed.episodeName === 'string' && parsed.episodeName.trim() ? parsed.episodeName.trim() : undefined,
+      episodeName:
+        typeof parsed.episodeName === 'string' && parsed.episodeName.trim()
+          ? parsed.episodeName.trim()
+          : undefined,
     };
   } catch (e) {
     console.error('[GeminiAI] Failed to parse episode with context:', e);
@@ -552,12 +695,15 @@ This file belongs to the TV show: "${showTitle}"`;
 
 export async function batchParseEpisodesWithContext(
   filenames: string[],
-  showTitle: string
+  showTitle: string,
+  callOptions?: GeminiCallOptions,
 ): Promise<Record<string, { season: number | null; episode: number | null; episodeName?: string }>> {
   if (filenames.length === 0) return {};
   try {
-    const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-    const prompt = `You are a TV episode parser.
+    const content = await generateContentWithKeys({
+      isPro: callOptions?.isPro,
+      onQueue: callOptions?.onQueue,
+      contents: `You are a TV episode parser.
 The user has a TV show: "${showTitle}"
 Extract the season number, episode number, and episode title (if present in the filename) for each of these files.
 Do not guess the episode title from external knowledge, only extract it if it's explicitly written in the filename.
@@ -567,49 +713,34 @@ Schema: {"<exact filename>": {"season": number|null, "episode": number|null, "ep
 
 Files to parse:
 ${JSON.stringify(filenames)}
-`;
-
-    let content = '';
-    let lastError: any = null;
-    for (const model of GEMINI_MODELS) {
-      try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: prompt,
-          config: {
-            temperature: 0.1,
-            maxOutputTokens: 2048,
-            responseMimeType: 'application/json',
-          },
-        });
-        content = response.text || '';
-        if (content) break;
-      } catch (err: any) {
-        lastError = err;
-        const status = err?.status ?? err?.statusCode ?? err?.code;
-        if (status === 429 || String(err?.message ?? '').toLowerCase().includes('quota')) {
-          continue;
-        }
-        break;
-      }
-    }
+`,
+      temperature: 0.1,
+      maxOutputTokens: 2048,
+      responseMimeType: 'application/json',
+    });
 
     if (!content) {
       console.warn('[GeminiAI] Empty response in batchParseEpisodesWithContext. Returning empty object.');
       return {};
     }
 
-    let text = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    const text = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
     const parsed = JSON.parse(text);
-    
-    const results: Record<string, { season: number | null; episode: number | null; episodeName?: string }> = {};
+
+    const results: Record<
+      string,
+      { season: number | null; episode: number | null; episodeName?: string }
+    > = {};
     for (const filename of filenames) {
       const p = parsed[filename];
       if (p) {
         results[filename] = {
           season: typeof p.season === 'number' ? p.season : null,
           episode: typeof p.episode === 'number' ? p.episode : null,
-          episodeName: typeof p.episodeName === 'string' && p.episodeName.trim() ? p.episodeName.trim() : undefined,
+          episodeName:
+            typeof p.episodeName === 'string' && p.episodeName.trim()
+              ? p.episodeName.trim()
+              : undefined,
         };
       }
     }
@@ -623,55 +754,37 @@ ${JSON.stringify(filenames)}
 export async function disambiguateMatch(
   filename: string,
   options: { id: string; title: string; year?: string }[],
-  userHint: string
+  userHint: string,
+  callOptions?: GeminiCallOptions,
 ): Promise<string | null> {
   if (options.length === 0) return null;
   try {
-    const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
     const systemPrompt = `You are a TV/Movie matcher helping to resolve an ambiguous file.
 The user will provide a filename, a list of matches, and a hint they provided.
 Based on their hint, identify which ID from the options is the correct match.
 Output ONLY valid JSON with no markdown formatting.
 Schema: {"id": string|null}`;
 
-    const prompt = `Filename: "${filename}"
+    const content = await generateContentWithKeys({
+      isPro: callOptions?.isPro,
+      onQueue: callOptions?.onQueue,
+      contents: `Filename: "${filename}"
 Matches:
 ${JSON.stringify(options, null, 2)}
 
-User's hint: "${userHint}"`;
-
-    let content = '';
-    let lastError: any = null;
-    for (const model of GEMINI_MODELS) {
-      try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: prompt,
-          config: {
-            systemInstruction: systemPrompt,
-            temperature: 0.1,
-            maxOutputTokens: 256,
-            responseMimeType: 'application/json',
-          },
-        });
-        content = response.text || '';
-        if (content) break;
-      } catch (err: any) {
-        lastError = err;
-        const status = err?.status ?? err?.statusCode ?? err?.code;
-        if (status === 429 || String(err?.message ?? '').toLowerCase().includes('quota')) {
-          continue;
-        }
-        break;
-      }
-    }
+User's hint: "${userHint}"`,
+      systemInstruction: systemPrompt,
+      temperature: 0.1,
+      maxOutputTokens: 256,
+      responseMimeType: 'application/json',
+    });
 
     if (!content) {
       console.warn('[GeminiAI] Empty response in disambiguateMatch. Returning null.');
       return null;
     }
 
-    let text = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    const text = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
     const parsed = JSON.parse(text);
     if (parsed.id !== undefined && parsed.id !== null) {
       return String(parsed.id);

@@ -43,6 +43,24 @@ export function setOnEventWritten(
   _onEventWritten = cb;
 }
 
+/**
+ * Poster-resolved hook — fired after recordCompletion when the new event
+ * carries a posterUrl. AccountProvider uses this to push the poster entry
+ * to Firestore without creating a direct dependency here.
+ */
+let _onPosterResolved: ((event: WatchEvent) => void) | null = null;
+
+/**
+ * Register (or deregister) a callback invoked after every successful
+ * recordCompletion write where the event has a non-empty posterUrl.
+ * Pass null to remove the hook (on sign-out).
+ */
+export function setOnPosterResolved(
+  cb: ((event: WatchEvent) => void) | null,
+): void {
+  _onPosterResolved = cb;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 async function readAll(): Promise<WatchEvent[]> {
@@ -124,6 +142,11 @@ export const watchHistoryService = {
     if (_onEventWritten) {
       _onEventWritten(newEvent);
     }
+
+    // Notify poster-sync layer if this event carries a poster URL
+    if (_onPosterResolved && newEvent.posterUrl) {
+      _onPosterResolved(newEvent);
+    }
   },
 
   /**
@@ -152,5 +175,35 @@ export const watchHistoryService = {
    */
   async _replaceAll(events: WatchEvent[]): Promise<void> {
     await writeAll(events);
+  },
+
+  /**
+   * Internal: patch posterUrls onto existing local WatchEvents for the given
+   * mediaIds. Used by syncService.syncMemories to apply cloud poster data to
+   * events that were synced without a poster (e.g. from an older app version).
+   *
+   * Only updates events that currently lack a posterUrl — existing posters are
+   * left untouched to avoid unnecessary writes.
+   */
+  async _patchPosters(
+    patches: Array<{ mediaId: string; posterUrl: string }>,
+  ): Promise<void> {
+    if (patches.length === 0) return;
+
+    const patchMap = new Map(patches.map((p) => [p.mediaId, p.posterUrl]));
+    const history = await readAll();
+
+    let changed = false;
+    const updated = history.map((e) => {
+      if (e.posterUrl) return e; // already has a poster — leave it
+      const url = patchMap.get(e.mediaId);
+      if (!url) return e;
+      changed = true;
+      return { ...e, posterUrl: url };
+    });
+
+    if (changed) {
+      await writeAll(updated);
+    }
   },
 };

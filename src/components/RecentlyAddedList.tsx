@@ -35,7 +35,8 @@ import { MediaItem } from '../types';
 import { tmdbService } from '../services/tmdbService';
 import { animeService } from '../services/animeService';
 import { geminiAIService } from '../services/geminiAIService';
-import { storageService } from '../storage/asyncStorage';
+import { usePro } from '../context/ProContext';
+import { fileLabel } from '../services/fileOrganizeService';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get("window");
 
@@ -48,6 +49,7 @@ interface RecentlyAddedListProps {
 type NavigationProp = any;
 
 export function RecentlyAddedList({ items, onDismiss, onRematchSuccess }: RecentlyAddedListProps) {
+  const { isPro } = usePro();
   const navigation = useNavigation<NavigationProp>();
   const [selectedOldItem, setSelectedOldItem] = useState<MediaItem | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -97,7 +99,10 @@ export function RecentlyAddedList({ items, onDismiss, onRematchSuccess }: Recent
         setLoading(true);
         let initialQuery = "";
         try {
-          const parsed = await geminiAIService.parseSingleFilename(selectedOldItem.localFile.filename);
+          const parsed = await geminiAIService.parseSingleFilename(
+            selectedOldItem.localFile.filename,
+            { isPro },
+          );
           if (parsed && parsed.title) {
             initialQuery = parsed.title;
           }
@@ -160,7 +165,11 @@ export function RecentlyAddedList({ items, onDismiss, onRematchSuccess }: Recent
       if (item.type === 'tv') {
         let parsed = parseSeasonEpisode(selectedOldItem.localFile.filename);
         try {
-          const aiParsed = await geminiAIService.parseEpisodeWithContext(selectedOldItem.localFile.filename, item.title);
+          const aiParsed = await geminiAIService.parseEpisodeWithContext(
+            selectedOldItem.localFile.filename,
+            item.title,
+            { isPro },
+          );
           if (aiParsed.season !== null && aiParsed.episode !== null) {
             parsed = {
               season: aiParsed.season,
@@ -209,7 +218,7 @@ export function RecentlyAddedList({ items, onDismiss, onRematchSuccess }: Recent
       }
       Alert.alert("Success", `"${fullyMatchedItem.title}" matched successfully!`);
       setSelectedOldItem(null);
-    } catch (e) {
+    } catch {
       Alert.alert("Error", "Failed to retrieve full item metadata.");
     } finally {
       setLoading(false);
@@ -386,7 +395,7 @@ export function RecentlyAddedList({ items, onDismiss, onRematchSuccess }: Recent
             <View style={styles.modalSubtitleBlock}>
               <Text style={styles.modalSubLabel}>File to rematch:</Text>
               <Text style={styles.modalSubtitle} numberOfLines={2}>
-                {selectedOldItem.localFile.filename}
+                {fileLabel(selectedOldItem.localFile)}
               </Text>
             </View>
           )}

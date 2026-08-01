@@ -5,7 +5,6 @@ import {
   StyleSheet,
   Image,
   Pressable,
-  Dimensions,
   Modal,
   Linking,
   ActivityIndicator,
@@ -28,7 +27,6 @@ import { cancelNotificationsForItem, scheduleUpcomingNotification } from '../ser
 import { useNotifications } from '../context/NotificationContext';
 import { tmdbService } from '../services/tmdbService';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const REMINDED_STORAGE_KEY = '@reminded_upcoming_items';
 
 interface UpcomingCardProps {
@@ -138,11 +136,15 @@ export function UpcomingCard({ item, onPress }: UpcomingCardProps) {
 
   const [confirmVisible, setConfirmVisible] = useState(false);
   const [permDenied, setPermDenied] = useState(false);
+  const [alreadyReleased, setAlreadyReleased] = useState(false);
 
   const handleRemind = async () => {
     setReminderAction('set');
-    const ids = await scheduleUpcomingNotification(item);
-    if (ids.length > 0) {
+    // Reset failure flags before each attempt so stale state doesn't persist
+    setPermDenied(false);
+    setAlreadyReleased(false);
+    const result = await scheduleUpcomingNotification(item);
+    if (result.ids.length > 0) {
       setReminded(true);
       // Persist the reminded state
       AsyncStorage.getItem(REMINDED_STORAGE_KEY).then((stored) => {
@@ -164,7 +166,12 @@ export function UpcomingCard({ item, onPress }: UpcomingCardProps) {
       });
       setConfirmVisible(true);
     } else {
-      setPermDenied(true);
+      if (result.reason === 'already_released') {
+        setAlreadyReleased(true);
+      } else {
+        // 'no_permission' or any other failure
+        setPermDenied(true);
+      }
       setConfirmVisible(true);
     }
   };
@@ -178,6 +185,7 @@ export function UpcomingCard({ item, onPress }: UpcomingCardProps) {
     await AsyncStorage.setItem(REMINDED_STORAGE_KEY, JSON.stringify(updatedIds));
     setReminded(false);
     setPermDenied(false);
+    setAlreadyReleased(false);
     setConfirmVisible(true);
   };
 
@@ -278,8 +286,24 @@ export function UpcomingCard({ item, onPress }: UpcomingCardProps) {
       </Animated.View>
 
       {/* Reminder Confirmation Sheet */}
-      <Modal visible={confirmVisible} transparent animationType="fade" onRequestClose={() => setConfirmVisible(false)}>
-        <Pressable style={styles.sheetBackdrop} onPress={() => setConfirmVisible(false)} />
+      <Modal
+        visible={confirmVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          setConfirmVisible(false);
+          setPermDenied(false);
+          setAlreadyReleased(false);
+        }}
+      >
+        <Pressable
+          style={styles.sheetBackdrop}
+          onPress={() => {
+            setConfirmVisible(false);
+            setPermDenied(false);
+            setAlreadyReleased(false);
+          }}
+        />
         <Animated.View entering={FadeIn.duration(220)} style={styles.confirmSheet}>
           {item.backdropUrl && (
             <Image source={{ uri: item.backdropUrl }} style={StyleSheet.absoluteFillObject as any} blurRadius={20} />
@@ -288,7 +312,23 @@ export function UpcomingCard({ item, onPress }: UpcomingCardProps) {
             colors={['rgba(10,10,12,0.4)', 'rgba(10,10,12,0.97)']}
             style={StyleSheet.absoluteFillObject}
           />
-          {!permDenied ? (
+          {alreadyReleased ? (
+            <View style={styles.confirmInner}>
+              <View style={[styles.confirmIconRing, { borderColor: 'rgba(251,191,36,0.4)', backgroundColor: 'rgba(251,191,36,0.1)' }]}>
+                <Bell size={26} color="#fbbf24" />
+              </View>
+              <Text style={[styles.confirmTitle, { color: '#fbbf24' }]}>Already Released</Text>
+              <Text style={styles.confirmBody}>
+                This title has already been released, so no reminder can be scheduled.
+              </Text>
+              <Pressable
+                style={[styles.confirmBtn, { backgroundColor: 'rgba(251,191,36,0.12)', borderColor: 'rgba(251,191,36,0.3)' }]}
+                onPress={() => { setConfirmVisible(false); setAlreadyReleased(false); }}
+              >
+                <Text style={[styles.confirmBtnText, { color: '#fbbf24' }]}>Got it</Text>
+              </Pressable>
+            </View>
+          ) : !permDenied ? (
             <View style={styles.confirmInner}>
               <View
                 style={[
@@ -316,9 +356,7 @@ export function UpcomingCard({ item, onPress }: UpcomingCardProps) {
                   : "We'll notify you a few hours before release. Tap the notification to open Upcoming and see where to watch."}
               </Text>
               <Pressable style={styles.confirmBtn} onPress={() => setConfirmVisible(false)}>
-                <Text style={styles.confirmBtnText}>
-                  {reminderAction === 'cancel' ? 'Got it' : 'Got it'}
-                </Text>
+                <Text style={styles.confirmBtnText}>Got it</Text>
               </Pressable>
             </View>
           ) : (
@@ -330,7 +368,10 @@ export function UpcomingCard({ item, onPress }: UpcomingCardProps) {
               <Text style={styles.confirmBody}>
                 Enable notifications in your device Settings to receive release reminders.
               </Text>
-              <Pressable style={[styles.confirmBtn, { backgroundColor: 'rgba(248,113,113,0.15)', borderColor: 'rgba(248,113,113,0.3)' }]} onPress={() => setConfirmVisible(false)}>
+              <Pressable
+                style={[styles.confirmBtn, { backgroundColor: 'rgba(248,113,113,0.15)', borderColor: 'rgba(248,113,113,0.3)' }]}
+                onPress={() => { setConfirmVisible(false); setPermDenied(false); }}
+              >
                 <Text style={[styles.confirmBtnText, { color: '#f87171' }]}>Dismiss</Text>
               </Pressable>
             </View>

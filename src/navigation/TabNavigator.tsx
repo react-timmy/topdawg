@@ -1,6 +1,5 @@
 import React, { useEffect } from "react";
-import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
-import { BottomTabBarProps } from "@react-navigation/bottom-tabs";
+import { createBottomTabNavigator , BottomTabBarProps } from "@react-navigation/bottom-tabs";
 import { View, Text, Pressable, StyleSheet } from "react-native";
 import Animated, {
   useSharedValue,
@@ -97,8 +96,6 @@ function CustomTabBar({ state, navigation }: BottomTabBarProps) {
       <View style={styles.tabBarContainer}>
         {state.routes.map((route, index) => {
           if (!TAB_CONFIG[route.name]) return null;
-          // Profile tab is hidden from the bar but the screen stays registered
-          if (route.name === 'Profile') return null;
 
           const isFocused = state.index === index;
 

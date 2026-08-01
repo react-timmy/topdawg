@@ -5,6 +5,9 @@
     "paths": {
       "@/*": [
         "./*"
+      ],
+      "filmsort-saf-copy": [
+        "./modules/filmsort-saf-copy/src"
       ]
     }
   },

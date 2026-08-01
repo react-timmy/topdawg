@@ -148,7 +148,7 @@ async function get<T>(path: string, params: Record<string, string> = {}): Promis
 
 // ─── Mappers ──────────────────────────────────────────────────────────────────
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function mapMovie(raw: any): MediaItem {
   return {
     id: mediaId('movie', raw.id),
@@ -166,7 +166,7 @@ function mapMovie(raw: any): MediaItem {
   };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function mapTV(raw: any): MediaItem {
   return {
     id: mediaId('tv', raw.id),
@@ -289,7 +289,7 @@ export const tmdbService = {
       });
 
       // Pick the best English logo if available
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       const logos: any[] = (raw.images as any)?.logos ?? [];
       const logo = logos.find((l) => l.iso_639_1 === 'en') ?? logos[0];
 
@@ -306,7 +306,7 @@ export const tmdbService = {
     try {
       const rawId = rawMediaId(showId);
       const data = await get<{ episodes: unknown[] }>(`/tv/${rawId}/season/${season}`);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       return data.episodes.map((ep: any): EpisodeInfo => ({
         id: String(ep.id),
         episodeNumber: ep.episode_number,

@@ -48,7 +48,7 @@ const logoStyles = StyleSheet.create({
   },
   rect: {
     position: 'absolute',
-    backgroundColor: '#cf0068ff', // dark red (Netflix shadow tone)
+    backgroundColor: '#8c185c', // dark red (Netflix shadow tone)
   },
   // Left vertical bar
   leftBar: {
@@ -56,6 +56,9 @@ const logoStyles = StyleSheet.create({
     top: 0,
     width: 15,
     height: 63,
+    borderBottomRightRadius: 30,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 15,
   },
   // Top horizontal bar
   topBar: {
@@ -63,14 +66,37 @@ const logoStyles = StyleSheet.create({
     top: 0,
     width: 25,
     height: 15,
+    borderBottomLeftRadius: 22,
+    borderTopRightRadius: 10,
   },
   // Mid horizontal bar (slightly shorter)
   midBar: {
     left: 15,
-    top: 25,
-    width: 15,
+    top: 24,
+    width: 17,
     height: 13,
+    borderBottomLeftRadius: 30,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 15,
   },
+  playIcon: {
+position: 'absolute',
+left:14,
+top: 26,
+width: 0, 
+height: 0, 
+backgroundColor: 'transparent',
+borderStyle: 'solid', 
+borderLeftWidth: 12,
+borderRightWidth: 0,
+borderBottomWidth: 8,
+borderTopWidth: 8,
+borderLeftColor: '#ffffff', 
+borderRightColor: 'transparent',
+borderTopColor: 'transparent',
+borderBottomColor: 'transparent',
+zIndex: 10,
+},
   // Bright diagonal highlight (10deg tilt, overlayed on top)
   highlight: {
     position: 'absolute',

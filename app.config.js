@@ -56,6 +56,7 @@ export default ({ config }) => ({
       },
     ],
     "expo-font",
+    "expo-file-system",
     "expo-screen-orientation",
   ],
   extra: {
@@ -63,7 +64,10 @@ export default ({ config }) => ({
       projectId: "3a0b553f-3175-4b67-999b-8c95abf703dd",
     },
     tmdbApiKey: process.env.TMDB_API_KEY ?? "25f581e42a744b10a56e5d443cac2300",
+    // Free pool: comma-separated keys for rotation + free-tier queue
     geminiApiKey: process.env.GEMINI_API_KEY ?? "AQ.Ab8RN6ImSaSrCS_WWAewNQzuBK1ytQA9mWLMjmNLigxY4z-Fag",
+    // Pro VIP key ("Skip the Line") — optional; falls back to free pool if empty
+    geminiProApiKey: process.env.GEMINI_PRO_API_KEY ?? "",
   },
   owner: "solotimmy",
 });

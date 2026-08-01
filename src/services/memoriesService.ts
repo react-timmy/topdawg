@@ -25,10 +25,16 @@ export interface UniqueTitleEntry {
   title: string;
   type: 'movie' | 'tv';
   posterUrl?: string;
-  /** ISO string of the first time this title was watched. */
+  /** ISO string of the first time this title was watched (or release date / now for library-only). */
   firstWatchedAt: string;
   /** Total number of watch events for this title. */
   watchCount: number;
+  /** True when the user has at least one watch event (still special for nostalgia). */
+  watched?: boolean;
+  /** Calendar year from TMDB release date, if known. */
+  releaseYear?: number;
+  /** Came from the user's scanned library shelf (not only history). */
+  inLibrary?: boolean;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -77,26 +83,6 @@ function deduplicateHistory(history: WatchEvent[]): UniqueTitleEntry[] {
 const POSTER_W = 80;
 const POSTER_H = 120;
 const GRID_COLS = 4;
-
-/** YouTube-style red play button SVG, centered on a dark overlay. */
-const PLAY_BUTTON_SVG = `
-<div style="
-  position:absolute;
-  top:50%;left:50%;
-  transform:translate(-50%,-50%);
-  width:56px;height:40px;
-  background:#FF0000;
-  border-radius:8px;
-  display:flex;align-items:center;justify-content:center;
-">
-  <div style="
-    width:0;height:0;
-    border-top:10px solid transparent;
-    border-bottom:10px solid transparent;
-    border-left:18px solid #ffffff;
-    margin-left:4px;
-  "></div>
-</div>`.trim();
 
 function buildPosterGrid(titles: UniqueTitleEntry[]): string {
   // Use up to 40 posters for the hero grid (5 rows × 8 cols at mobile width)

@@ -13,6 +13,22 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const PROFILE_KEY = '@filmsort:local_profile';
 
+// ─── Sync hook (v1.2) ─────────────────────────────────────────────────────────
+// AccountProvider registers a callback here so that every profile save is also
+// pushed to Firestore — without creating a direct dependency on Firestore here.
+
+let _onProfileSaved: ((profile: LocalProfile) => void) | null = null;
+
+/**
+ * Register (or deregister) a callback invoked after every successful
+ * profileService.save() call. Pass null to remove the hook (on sign-out).
+ */
+export function setOnProfileSaved(
+  cb: ((profile: LocalProfile) => void) | null,
+): void {
+  _onProfileSaved = cb;
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface LocalProfile {
@@ -62,12 +78,15 @@ export const profileService = {
 
   /**
    * Save (full or partial) profile updates.
+   * Fires the setOnProfileSaved hook after a successful write so AccountProvider
+   * can push the update to Firestore.
    */
   async save(updates: Partial<LocalProfile>): Promise<void> {
     try {
       const current = await profileService.get();
       const next: LocalProfile = { ...current, ...updates };
       await AsyncStorage.setItem(PROFILE_KEY, JSON.stringify(next));
+      _onProfileSaved?.(next);
     } catch {
       // silently fail — non-critical
     }

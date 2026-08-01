@@ -3,7 +3,6 @@ import { MediaItem } from '../types';
 
 // Uses the public Jikan REST API (MyAnimeList) — no key required.
 const BASE_URL = 'https://api.jikan.moe/v4';
-const IMG_BASE = 'https://image.tmdb.org/t/p';
 
 const CACHE_PREFIX = '@cinescan:cache:anime:';
 
@@ -24,7 +23,7 @@ async function setCached(key: string, value: any): Promise<void> {
   }
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function mapAnime(raw: any): MediaItem {
   return {
     // Namespace MAL ids so they never collide with TMDB numeric ids

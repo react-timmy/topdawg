@@ -12,7 +12,6 @@ import {
   Image,
   Pressable,
   ActivityIndicator,
-  Dimensions,
 } from 'react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
@@ -23,6 +22,7 @@ import {
   Flame, TrendingUp, TrendingDown, Minus, Crown,
 } from 'lucide-react-native';
 
+import { MediaItem } from '../types';
 import { watchHistoryService, WatchEvent } from '../storage/watchHistoryService';
 import { storageService } from '../storage/asyncStorage';
 import { computeStats, WatchStats } from '../utils/statsEngine';
@@ -35,7 +35,6 @@ import { useAccount } from '../context/AccountContext';
 import { AccountHeader } from '../components/AccountHeader';
 import { FilmSortAccount } from '../services/authService';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_PADDING = 16;
 
 // ─── Icon resolver ────────────────────────────────────────────────────────────
@@ -434,13 +433,13 @@ function RecentlyWatchedList({
 export function ProfileScreen() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<any>();
-  const { savedBadges } = useBadgeUnlock();
   const { isPro, scansUsed, scansRemaining } = usePro();
   const { account, isSyncing, syncPending, signIn } = useAccount();
   const [signingIn, setSigningIn] = useState(false);
   const [signInError, setSignInError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [history, setHistory] = useState<WatchEvent[]>([]);
+  const [library, setLibrary] = useState<MediaItem[]>([]);
   const [stats, setStats] = useState<WatchStats>(() => computeStats([]));
   const [badges, setBadges] = useState<BadgeResult[]>(() => evaluateBadges([], computeStats([])));
   const [headerH, setHeaderH] = useState(0);
@@ -449,11 +448,15 @@ export function ProfileScreen() {
     useCallback(() => {
       let cancelled = false;
       setLoading(true);
-      watchHistoryService.getHistory().then((h) => {
+      Promise.all([
+        watchHistoryService.getHistory(),
+        storageService.getLibrary(),
+      ]).then(([h, lib]) => {
         if (cancelled) return;
         const s = computeStats(h);
         const b = evaluateBadges(h, s);
         setHistory(h);
+        setLibrary(lib);
         setStats(s);
         setBadges(b);
         setLoading(false);
@@ -545,7 +548,7 @@ export function ProfileScreen() {
         <GenreChart genres={stats.genreBreakdown} />
         <AnimeBlock stats={stats} />
         <BadgeSection badges={badges} />
-        <MemoriesCard history={history} animDelay={220} />
+        <MemoriesCard history={history} library={library} animDelay={220} />
         <RecentlyWatchedList history={history} onPressItem={handlePressHistoryItem} />
       </ScrollView>
     </View>

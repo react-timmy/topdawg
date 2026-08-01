@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Bell, X, Trash2, CheckCheck, CalendarDays, Sparkles, Tv, Star } from 'lucide-react-native';
+import { Bell, X, CalendarDays, Sparkles, Tv, Star } from 'lucide-react-native';
 import Animated, { FadeInDown, FadeIn } from 'react-native-reanimated';
 import { InAppNotification, NotificationTag, useNotifications } from '../context/NotificationContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
