@@ -31,6 +31,7 @@ import {
   Check,
   RefreshCw,
   Youtube,
+  Users,
 } from 'lucide-react-native';
 import Animated, {
   FadeIn,
@@ -54,6 +55,8 @@ import { watchHistoryService } from '../storage/watchHistoryService';
 import { useBadgeUnlock } from '../context/BadgeUnlockContext';
 import { usePro } from '../context/ProContext';
 import { fileLabel } from '../services/fileOrganizeService';
+import { useWatchParty } from '../context/WatchPartyContext';
+import { useAccount } from '../context/AccountContext';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const BACKDROP_HEIGHT = SCREEN_HEIGHT * 0.42;
@@ -219,6 +222,8 @@ export function DetailsScreen() {
   const [trailerUrl, setTrailerUrl] = useState<string | null>(null);
   const { checkForNewBadges } = useBadgeUnlock();
   const { isPro } = usePro();
+  const party = useWatchParty();
+  const { account } = useAccount();
 
   const [showMatchModal, setShowMatchModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -683,6 +688,26 @@ export function DetailsScreen() {
     }
   };
 
+  const handleCreateWatchParty = async () => {
+    if (!account) {
+      Alert.alert('Sign in required', 'You must be signed in to create a watch party.');
+      return;
+    }
+
+    const activeFile = item.localFile || (item.localFiles && item.localFiles[0]);
+    if (!activeFile?.uri) {
+      Alert.alert('Notice', 'No local video file available to watch together.');
+      return;
+    }
+
+    try {
+      const roomId = await party.createParty(item, activeFile.uri || null);
+      navigation.navigate('WatchParty', { roomId, item });
+    } catch (e) {
+      Alert.alert('Error', e instanceof Error ? e.message : 'Failed to create watch party.');
+    }
+  };
+
   // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <View style={styles.root}>
@@ -757,6 +782,26 @@ export function DetailsScreen() {
             ) : null}
           </Animated.View>
 
+          {/* Streaming providers — top-right of backdrop */}
+          {providersLoaded && watchProviders.length > 0 ? (
+            <Animated.View entering={FadeIn.delay(200).duration(400)} style={styles.providersOverlay}>
+              {watchProviders.map((p) => (
+                <Pressable
+                  key={p.id}
+                  style={styles.providerBtnOverlay}
+                  onPress={() => handleOpenProvider(p)}
+                >
+                  <BlurView intensity={60} tint="dark" style={StyleSheet.absoluteFillObject} />
+                  {p.logoUrl ? (
+                    <Image source={{ uri: p.logoUrl }} style={styles.providerLogoOverlay} />
+                  ) : (
+                    <Globe size={16} color="#ffffff" />
+                  )}
+                </Pressable>
+              ))}
+            </Animated.View>
+          ) : null}
+
           {/* Left column: title/logo → tagline → info strip, all stacked bottom-left */}
           <Animated.View
             entering={FadeIn.delay(80).duration(420)}
@@ -817,18 +862,13 @@ export function DetailsScreen() {
         {/* ── Content ────────────────────────────────────────────────────────── */}
         <View style={styles.content}>
 
-          {/* Overview — moved above genre pills and action buttons for better hierarchy */}
-          <Animated.View entering={FadeInDown.delay(120).duration(400)}>
-            <Text style={styles.overview}>{item.description}</Text>
-          </Animated.View>
-
           {/* Genre pills — always exactly 3 */}
           {(() => {
             const raw = item.genres ?? [];
             const capped = raw.slice(0, 3);
             while (capped.length < 3) capped.push('Other');
             return (
-              <Animated.View entering={FadeInDown.delay(150).duration(400)} style={styles.genreRow}>
+              <Animated.View entering={FadeInDown.delay(120).duration(400)} style={styles.genreRow}>
                 {capped.map((g, idx) => (
                   <View key={`${g}-${idx}`} style={styles.genrePill}>
                     <Text style={styles.genrePillText}>{g}</Text>
@@ -838,30 +878,13 @@ export function DetailsScreen() {
             );
           })()}
 
+          {/* Overview — moved below genre pills */}
+          <Animated.View entering={FadeInDown.delay(150).duration(400)}>
+            <Text style={styles.overview}>{item.description}</Text>
+          </Animated.View>
+
           {/* Action buttons */}
           <Animated.View entering={FadeInDown.delay(180).duration(400)} style={styles.actionSectionContainer}>
-            {/* Supported streaming platforms only — hidden when none available */}
-            {providersLoaded && watchProviders.length > 0 ? (
-              <View style={styles.providersRow}>
-                {watchProviders.map((p) => (
-                  <Pressable
-                    key={p.id}
-                    style={styles.providerBtn}
-                    onPress={() => handleOpenProvider(p)}
-                  >
-                    <BlurView intensity={50} tint="dark" style={StyleSheet.absoluteFillObject} />
-                    {p.logoUrl ? (
-                      <Image source={{ uri: p.logoUrl }} style={styles.providerLogo} />
-                    ) : (
-                      <Globe size={14} color="#ffffff" />
-                    )}
-                    <Text style={styles.providerBtnText} numberOfLines={1}>
-                      {p.name}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
-            ) : null}
 
             <View style={styles.secondaryActionsRow}>
               {/* Watch Trailer — only shown when trailerUrl is available */}
@@ -1306,6 +1329,35 @@ const styles = StyleSheet.create({
     elevation: 10,
   },
   poster: { width: '100%', height: '100%' },
+
+  // Streaming providers overlay — top-right of backdrop
+  providersOverlay: {
+    position: 'absolute',
+    top: 43,
+    right: 16,
+    flexDirection: 'row',
+    gap: 8,
+  },
+  providerBtnOverlay: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  providerLogoOverlay: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+  },
 
   // Left column — anchored bottom-left inside the backdrop, right edge stops before the poster
   leftColumn: {

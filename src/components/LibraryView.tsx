@@ -484,9 +484,6 @@ function StarredCard({
         style={StyleSheet.absoluteFillObject}
       />
 
-      {/* Gold top border accent */}
-      <View style={styles.starredTopBorder} />
-
       {/* Non-interactive body — just layout, no Pressable */}
       <View style={styles.starredPressable}>
         {/* Poster */}
@@ -842,8 +839,11 @@ export function LibraryView({
     const mediaRows: ListRow[] = sorted.map((item) => ({ kind: 'media', item }));
 
     // Append cloud-only entries only in the starred tab
+    // Filter out entries that already exist in the local library (as starred items)
     if (filter === "starred" && cloudStarredItems.length > 0) {
-      const cloudRows: ListRow[] = cloudStarredItems.map((entry) => ({
+      const localIds = new Set(items.map((i) => i.id));
+      const cloudOnlyEntries = cloudStarredItems.filter((e) => !localIds.has(e.mediaId));
+      const cloudRows: ListRow[] = cloudOnlyEntries.map((entry) => ({
         kind: 'cloud',
         entry,
       }));
@@ -1714,8 +1714,6 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     backgroundColor: "#0d0d10",
     borderRadius: 20,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.07)",
     overflow: "hidden",
     padding: 14,
     gap: 14,

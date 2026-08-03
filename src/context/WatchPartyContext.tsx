@@ -81,6 +81,8 @@ export interface WatchPartyContextValue {
   sendMessage: (text: string) => Promise<void>;
   /** Clear any error. */
   clearError: () => void;
+  /** Get room details by ID (for join flow). */
+  getRoom: (roomId: string) => Promise<WatchPartyRoom | null>;
 
   /**
    * Register the VideoPlayer's bridge so the context can seek/play/pause
@@ -115,6 +117,7 @@ const WatchPartyContext = createContext<WatchPartyContextValue>({
   leaveParty: async () => {},
   sendMessage: async () => {},
   clearError: () => {},
+  getRoom: async () => null,
   registerPlayer: () => {},
   notifyPlayback: () => {},
 });
@@ -178,7 +181,7 @@ export function WatchPartyProvider({ children }: { children: React.ReactNode }) 
     });
 
     unsubMembersRef.current = watchPartyService.onMembers(roomId, setMembers);
-    unsubMessagesRef.current = watchPartyService.onMessages(roomId, 100, setMessages);
+    unsubMessagesRef.current = watchPartyService.onMessages(roomId, setMessages);
   }, [stopListeners, teardown]);
 
   // ── Host push timer ────────────────────────────────────────────────────────
@@ -351,6 +354,10 @@ export function WatchPartyProvider({ children }: { children: React.ReactNode }) 
     playbackRef.current = { positionSeconds, durationSeconds, isPlaying, isBuffering };
   }, []);
 
+  const getRoom = useCallback(async (roomId: string): Promise<WatchPartyRoom | null> => {
+    return watchPartyService.getRoom(roomId);
+  }, []);
+
   return (
     <WatchPartyContext.Provider
       value={{
@@ -366,6 +373,7 @@ export function WatchPartyProvider({ children }: { children: React.ReactNode }) 
         leaveParty,
         sendMessage,
         clearError,
+        getRoom,
         registerPlayer,
         notifyPlayback,
       }}

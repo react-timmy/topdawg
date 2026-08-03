@@ -187,6 +187,19 @@ export const watchPartyService = {
     await roomDoc(roomId).update({ status: 'ended' });
   },
 
+  // ── Start countdown (host only) ────────────────────────────────────────────
+
+  /**
+   * Start a 3-second countdown before the video plays.
+   * Status: lobby → countdown, then countdown → playing after 3s
+   */
+  async startCountdown(roomId: string): Promise<void> {
+    await roomDoc(roomId).update({
+      status: 'countdown',
+      countdownStartedAt: new Date().toISOString(),
+    });
+  },
+
   // ── Playback sync (host only) ──────────────────────────────────────────────
 
   /**

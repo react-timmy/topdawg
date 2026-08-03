@@ -3,6 +3,7 @@ export default ({ config }) => ({
   ...config,
   name: "FilmSort",
   slug: "filmsort",
+  scheme: "filmsort",
   version: "1.0.0",
   orientation: "portrait",
   icon: "./assets/images/icon.png",
@@ -22,6 +23,7 @@ export default ({ config }) => ({
   ios: {
     supportsTablet: true,
     bundleIdentifier: "app.filmsorter.filmsort",
+    googleServicesFile: "./GoogleService-Info.plist",
   },
   android: {
     // Uses EAS file secret during cloud builds, falls back to local file in dev

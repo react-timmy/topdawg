@@ -11,6 +11,7 @@ export type RootStackParamList = {
   TermsOfUse: undefined;
   Settings: undefined;
   WatchParty: { roomId: string; item: MediaItem };
+  JoinWatchParty: undefined;
 };
 
 
@@ -189,7 +190,7 @@ export interface CastState {
 
 export type WatchPartyRole = 'host' | 'guest';
 
-export type WatchPartyStatus = 'lobby' | 'playing' | 'paused' | 'ended';
+export type WatchPartyStatus = 'lobby' | 'countdown' | 'playing' | 'paused' | 'ended';
 
 /** A single member inside a watch party room. */
 export interface WatchPartyMember {
@@ -246,4 +247,6 @@ export interface WatchPartyRoom {
   expiresAt: string;
   /** Max 8 members */
   memberCount: number;
+  /** Countdown start time (ISO-8601) — when status becomes 'countdown' */
+  countdownStartedAt?: string;
 }

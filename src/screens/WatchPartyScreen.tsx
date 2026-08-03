@@ -49,12 +49,14 @@ import {
   WifiOff,
   Copy,
   Check,
+  QrCode,
 } from 'lucide-react-native';
 
 import { RootStackParamList, WatchPartyMember, WatchPartyMessage } from '../types';
 import { useWatchParty } from '../context/WatchPartyContext';
 import { useAccount } from '../context/AccountContext';
-import { MEMBER_TIMEOUT_MS } from '../services/watchPartyService';
+import { MEMBER_TIMEOUT_MS, watchPartyService } from '../services/watchPartyService';
+import { QRCodeModal } from '../components/QRCodeModal';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -214,6 +216,7 @@ export function WatchPartyScreen() {
   const [draftMsg, setDraftMsg] = useState('');
   const [copied, setCopied] = useState(false);
   const [tab, setTab] = useState<'members' | 'chat'>('members');
+  const [showQRModal, setShowQRModal] = useState(false);
   const chatListRef = useRef<FlatList<WatchPartyMessage>>(null);
 
   // ── Join on mount if not already in room ─────────────────────────────────
@@ -239,8 +242,16 @@ export function WatchPartyScreen() {
   useEffect(() => {
     if (party.isInParty || party.isLoading) return;
     // Room was torn down (host ended it)
-    if (navigation.canGoBack()) navigation.goBack();
-  }, [party.isInParty, party.isLoading, navigation]);
+    if (!party.isHost) {
+      Alert.alert(
+        'Watch Party Has Ended',
+        'The host has ended this watch party.',
+        [{ text: 'OK', onPress: () => navigation.canGoBack() && navigation.goBack() }]
+      );
+    } else if (navigation.canGoBack()) {
+      navigation.goBack();
+    }
+  }, [party.isInParty, party.isLoading, party.isHost, navigation]);
 
   // ── Actions ───────────────────────────────────────────────────────────────
 
@@ -264,13 +275,26 @@ export function WatchPartyScreen() {
     }
   }, [roomId, handleShare]);
 
-  const handleStartWatching = useCallback(() => {
+  const handleStartWatching = useCallback(async () => {
+    // Use the room's active file URI if available, otherwise use the item from params
+    const playItem = party.room?.item || item;
+    
+    // For host: start countdown first
+    if (party.isHost && party.room) {
+      try {
+        await watchPartyService.startCountdown(party.room.roomId);
+      } catch (e) {
+        console.error('Failed to start countdown:', e);
+      }
+    }
+    
+    // Navigate to video player - countdown will show there
     navigation.navigate('VideoPlayer', {
-      item,
+      item: playItem,
       startPosition: 0,
       watchPartyRoomId: roomId,
     });
-  }, [navigation, item, roomId]);
+  }, [navigation, item, roomId, party.room, party.isHost]);
 
   const handleLeave = useCallback(() => {
     Alert.alert(
@@ -347,6 +371,10 @@ export function WatchPartyScreen() {
             </View>
           </View>
         </View>
+
+        <Pressable style={styles.qrBtn} onPress={() => setShowQRModal(true)} hitSlop={12}>
+          <QrCode size={20} color={TEXT_PRIMARY} />
+        </Pressable>
 
         <Pressable style={styles.shareBtn} onPress={handleShare} hitSlop={12}>
           <Share2 size={20} color={TEXT_PRIMARY} />
@@ -476,6 +504,14 @@ export function WatchPartyScreen() {
           </View>
         </>
       )}
+      
+      {/* QR Code Modal */}
+      <QRCodeModal
+        visible={showQRModal}
+        onClose={() => setShowQRModal(false)}
+        roomCode={roomId}
+        movieTitle={item.title}
+      />
     </KeyboardAvoidingView>
   );
 }
@@ -496,6 +532,7 @@ const styles = StyleSheet.create({
   headerMetaText: { color: TEXT_SECONDARY, fontSize: 12 },
   statusPill: { paddingHorizontal: 7, paddingVertical: 2, borderRadius: 10 },
   statusPillText: { fontSize: 10, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5 },
+  qrBtn: { padding: 4, marginRight: 8 },
   shareBtn: { padding: 4 },
 
   // Hero

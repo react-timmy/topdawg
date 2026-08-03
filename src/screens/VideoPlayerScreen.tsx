@@ -20,6 +20,7 @@ import {
   ScrollView,
   Image,
   useWindowDimensions,
+  Alert,
 } from 'react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -133,6 +134,67 @@ function SkipIcon({ direction }: { direction: 'back' | 'forward' }) {
     <View style={styles.skipIconWrap}>
       <Icon size={58} color="#ffffff" strokeWidth={2.2} />
       <Text style={styles.skipIconNum}>10</Text>
+    </View>
+  );
+}
+
+// ─── Countdown Overlay ────────────────────────────────────────────────────────
+
+function CountdownOverlay({ startedAt, onComplete }: { startedAt: string; onComplete: () => void }) {
+  const [count, setCount] = useState(3);
+  const scale = useSharedValue(0.5);
+  const opacity = useSharedValue(1);
+
+  useEffect(() => {
+    const startTime = new Date(startedAt).getTime();
+    const elapsed = Date.now() - startTime;
+    const remaining = 3000 - elapsed;
+
+    if (remaining <= 0) {
+      onComplete();
+      return;
+    }
+
+    // Set initial count based on elapsed time
+    const initialCount = Math.ceil(remaining / 1000);
+    setCount(initialCount);
+
+    const interval = setInterval(() => {
+      setCount((prev) => {
+        if (prev <= 1) {
+          clearInterval(interval);
+          onComplete();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [startedAt, onComplete]);
+
+  useEffect(() => {
+    if (count === 0) return;
+    // Animate each number
+    scale.value = 0.5;
+    opacity.value = 1;
+    scale.value = withTiming(1.2, { duration: 300, easing: Easing.out(Easing.cubic) });
+    opacity.value = withTiming(0, { duration: 900 });
+  }, [count, scale, opacity]);
+
+  const animStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+    opacity: opacity.value,
+  }));
+
+  if (count === 0) return null;
+
+  return (
+    <View style={styles.countdownOverlay} pointerEvents="none">
+      <Text style={styles.countdownReady}>Ready?</Text>
+      <Animated.Text style={[styles.countdownNumber, animStyle]}>
+        {count}
+      </Animated.Text>
     </View>
   );
 }
@@ -472,6 +534,8 @@ export function VideoPlayerScreen() {
   }, [selectedSeason]); // eslint-disable-line react-hooks/exhaustive-deps
   const [showNextUp, setShowNextUp] = useState(false);
   const [videoFill, setVideoFill] = useState(false);
+  const [showCountdown, setShowCountdown] = useState(false);
+  const [countdownStartedAt, setCountdownStartedAt] = useState<string | null>(null);
   const pinchScale = useSharedValue(1);
   const panSideSV = useSharedValue(0);
 
@@ -796,9 +860,39 @@ export function VideoPlayerScreen() {
   // ── Watch Party: auto-join room if navigated here from WatchPartyScreen ───
   useEffect(() => {
     if (!watchPartyRoomId || party.isInParty) return;
+    
+    // Check if we have a playable file
+    if (!activeFile?.uri) {
+      Alert.alert(
+        'Video Not Available',
+        'You don\'t have this video file in your library. The host is watching something you need to download first.',
+        [{ text: 'OK', onPress: () => navigation.goBack() }]
+      );
+      return;
+    }
+    
     party.joinParty(watchPartyRoomId, initialItem).catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [watchPartyRoomId]);
+
+  // ── Watch Party: Handle countdown and sync ────────────────────────────────
+  useEffect(() => {
+    if (!party.room) return;
+
+    // Show countdown when status is 'countdown'
+    if (party.room.status === 'countdown' && party.room.countdownStartedAt) {
+      setShowCountdown(true);
+      setCountdownStartedAt(party.room.countdownStartedAt);
+    } else {
+      setShowCountdown(false);
+    }
+
+    // Auto-play when countdown finishes (status changes to 'playing')
+    if (party.room.status === 'playing' && player && !player.playing) {
+      player.play();
+      setIsPlaying(true);
+    }
+  }, [party.room?.status, party.room?.countdownStartedAt, player]);
 
   // ── Cast: notify context when AirPlay external route becomes active ────────
   useEffect(() => {
@@ -846,6 +940,32 @@ export function VideoPlayerScreen() {
   const trackFillAnimStyle = useAnimatedStyle(() => ({ height: trackH.value }));
   // pointerEvents can't be animated directly — we derive it from controlsPointer
   // by using the state boolean showControls which is kept in sync.
+
+  // ── Countdown Complete ────────────────────────────────────────────────────
+  
+  const handleCountdownComplete = useCallback(async () => {
+    setShowCountdown(false);
+    
+    // Host: update room status to 'playing' and start broadcasting
+    if (party.isHost && party.room) {
+      try {
+        const { watchPartyService } = await import('../services/watchPartyService');
+        await watchPartyService.pushPlayback(party.room.roomId, {
+          positionSeconds: 0,
+          isPlaying: true,
+          seekGeneration: 0,
+        });
+      } catch (e) {
+        console.error('Failed to start playback:', e);
+      }
+    }
+
+    // Everyone: start playing
+    if (player) {
+      player.play();
+      setIsPlaying(true);
+    }
+  }, [party.isHost, party.room, player]);
 
   // ── Controls ──────────────────────────────────────────────────────────────
 
@@ -1124,6 +1244,14 @@ export function VideoPlayerScreen() {
           }
         }}
       />
+
+      {/* Countdown Overlay — shows 3-2-1 countdown before video starts */}
+      {showCountdown && countdownStartedAt && (
+        <CountdownOverlay
+          startedAt={countdownStartedAt}
+          onComplete={handleCountdownComplete}
+        />
+      )}
 
       {/* Controls overlay — always mounted, fades in/out via overlayOpacity */}
       <Animated.View
@@ -1953,6 +2081,31 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(10,10,12,0.7)',
     borderWidth: 1, borderColor: 'rgba(229,9,20,0.4)',
     zIndex: 8,
+  },
+
+  // ── Countdown Overlay ─────────────────────────────────────────────────────
+  countdownOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    zIndex: 10,
+    gap: 16,
+  },
+  countdownReady: {
+    color: '#ffffff',
+    fontSize: 24,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+  },
+  countdownNumber: {
+    color: '#ffffff',
+    fontSize: 120,
+    fontWeight: '900',
+    textShadowColor: 'rgba(229,9,20,0.8)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 24,
   },
 
   // ── Shared right-side panel layout (Episodes + Audio) ─────────────────────

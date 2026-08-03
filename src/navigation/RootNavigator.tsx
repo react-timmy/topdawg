@@ -11,6 +11,7 @@ import { PrivacyPolicyScreen } from '../screens/PrivacyPolicyScreen';
 import { TermsOfUseScreen } from '../screens/TermsOfUseScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
 import { WatchPartyScreen } from '../screens/WatchPartyScreen';
+import { JoinWatchPartyScreen } from '../screens/JoinWatchPartyScreen';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
@@ -39,6 +40,11 @@ export function RootNavigator() {
       <Stack.Screen
         name="WatchParty"
         component={WatchPartyScreen}
+        options={{ animation: 'slide_from_bottom' }}
+      />
+      <Stack.Screen
+        name="JoinWatchParty"
+        component={JoinWatchPartyScreen}
         options={{ animation: 'slide_from_bottom' }}
       />
     </Stack.Navigator>
