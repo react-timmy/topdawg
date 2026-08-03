@@ -6,6 +6,40 @@ const RECENTLY_MATCHED_KEY = '@cinescan:recently_matched';
 /** Cap so the list cannot grow without bound across many scans. */
 const RECENTLY_MATCHED_MAX = 200;
 
+// ─── Sync hook (v1.2) ─────────────────────────────────────────────────────────
+// AccountProvider registers a callback here so every starred/unstarred change
+// (and any update that touches starred or lastEpisode) is also pushed to
+// Firestore — without creating a direct dependency on Firestore here.
+
+export type StarChangedEvent =
+  | { action: 'starred'; item: MediaItem }   // item now has starred: true
+  | { action: 'unstarred'; id: string };     // item was un-starred
+
+let _onStarChanged: ((event: StarChangedEvent) => void) | null = null;
+
+/**
+ * Register (or deregister) a callback invoked after any local write that
+ * changes a library item's starred state or lastEpisode.
+ * Pass null to remove the hook (on sign-out).
+ */
+export function setOnStarChanged(
+  cb: ((event: StarChangedEvent) => void) | null,
+): void {
+  _onStarChanged = cb;
+}
+
+/**
+ * When true, updateItem and toggleStar will NOT fire _onStarChanged.
+ * Set this before writes that originate from the cloud listener or
+ * initialSync to prevent the local write from echoing back to Firestore.
+ */
+let _suppressStarHook = false;
+
+export function suppressStarHook(suppress: boolean): void {
+  _suppressStarHook = suppress;
+}
+
+
 /** Migrate legacy bare-numeric ids → `movie:123` / `tv:123`. */
 function normalizeItemId(item: MediaItem): MediaItem {
   if (item.id.includes(':')) return item;
@@ -126,6 +160,19 @@ export const storageService = {
       i.id === id ? { ...i, starred: !i.starred } : i,
     );
     await storageService.saveLibrary(updated);
+
+    // v1.2: notify sync layer (skip if this write came from the cloud listener)
+    if (!_suppressStarHook) {
+      const changed = updated.find((i) => i.id === id);
+      if (changed) {
+        if (changed.starred) {
+          _onStarChanged?.({ action: 'starred', item: changed });
+        } else {
+          _onStarChanged?.({ action: 'unstarred', id });
+        }
+      }
+    }
+
     return updated;
   },
 
@@ -135,6 +182,20 @@ export const storageService = {
       i.id === id ? { ...i, ...patch } : i,
     );
     await storageService.saveLibrary(updated);
+
+    // v1.2: notify sync layer if starred state or lastEpisode changed
+    // Skip if this write came from the cloud listener to prevent echo loops.
+    if (!_suppressStarHook && ('starred' in patch || 'lastEpisode' in patch)) {
+      const changed = updated.find((i) => i.id === id);
+      if (changed) {
+        if (changed.starred) {
+          _onStarChanged?.({ action: 'starred', item: changed });
+        } else if ('starred' in patch && !changed.starred) {
+          _onStarChanged?.({ action: 'unstarred', id });
+        }
+      }
+    }
+
     return updated;
   },
 

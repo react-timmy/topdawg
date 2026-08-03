@@ -10,6 +10,7 @@ import { VideoPlayerScreen } from '../screens/VideoPlayerScreen';
 import { PrivacyPolicyScreen } from '../screens/PrivacyPolicyScreen';
 import { TermsOfUseScreen } from '../screens/TermsOfUseScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
+import { WatchPartyScreen } from '../screens/WatchPartyScreen';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
@@ -35,6 +36,11 @@ export function RootNavigator() {
       <Stack.Screen name="PrivacyPolicy" component={PrivacyPolicyScreen} />
       <Stack.Screen name="TermsOfUse"    component={TermsOfUseScreen} />
       <Stack.Screen name="Settings"      component={SettingsScreen} />
+      <Stack.Screen
+        name="WatchParty"
+        component={WatchPartyScreen}
+        options={{ animation: 'slide_from_bottom' }}
+      />
     </Stack.Navigator>
   );
 }

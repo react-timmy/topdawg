@@ -48,6 +48,16 @@ export default ({ config }) => ({
     "@react-native-firebase/app",
     "expo-video",
     [
+      "react-native-google-cast",
+      {
+        // Receiver app ID — use the default media receiver for now.
+        // Replace with your custom receiver ID once you publish one.
+        receiverAppID: "CC1AD845",
+        // iOS: request local-network permission for Cast device discovery
+        startDiscoveryAfterFirstTapOnCastButton: false,
+      },
+    ],
+    [
       "expo-media-library",
       {
         photosPermission: "Allow FilmSort to scan your local videos and build your media library.",
@@ -63,11 +73,11 @@ export default ({ config }) => ({
     eas: {
       projectId: "3a0b553f-3175-4b67-999b-8c95abf703dd",
     },
-    tmdbApiKey: process.env.TMDB_API_KEY ?? "25f581e42a744b10a56e5d443cac2300",
-    // Free pool: comma-separated keys for rotation + free-tier queue
-    geminiApiKey: process.env.GEMINI_API_KEY ?? "AQ.Ab8RN6ImSaSrCS_WWAewNQzuBK1ytQA9mWLMjmNLigxY4z-Fag",
-    // Pro VIP key ("Skip the Line") — optional; falls back to free pool if empty
-    geminiProApiKey: process.env.GEMINI_PRO_API_KEY ?? "",
+    // Proxy base URL — the ONLY runtime value the app needs.
+    // Real keys (TMDB, Gemini) live in Cloudflare Worker Secrets, never here.
+    // Format: https://filmsort-proxy.<your-subdomain>.workers.dev
+    // Set EXPO_PUBLIC_PROXY_BASE_URL in .env after deploying the worker.
+    proxyBaseUrl: process.env.EXPO_PUBLIC_PROXY_BASE_URL ?? "",
   },
   owner: "solotimmy",
 });

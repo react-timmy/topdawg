@@ -61,12 +61,25 @@ import {
   Gauge,
   Lock,
   Unlock,
+  Search,
+  Download,
+  AlignCenter,
+  MoveVertical,
+  Type,
 } from 'lucide-react-native';
 
 import { RootStackParamList, MediaItem, LocalFile } from '../types';
 import { watchProgressService, COMPLETED_FRACTION } from '../storage/watchProgressService';
 import { watchHistoryService } from '../storage/watchHistoryService';
 import { useBadgeUnlock } from '../context/BadgeUnlockContext';
+import { useSubtitles } from '../hooks/useSubtitles';
+import { SubtitleOverlay, SubtitleStyleConfig, SubtitleFontWeight, SubtitleBgOpacity } from '../components/SubtitleOverlay';
+import { searchSubtitles, downloadSubtitleCues, SUBTITLE_LANGUAGES, SubtitleHit } from '../services/subtitleSearchService';
+import { subtitleStorageService } from '../storage/subtitleStorageService';
+import { CastButton } from '../components/CastButton';
+import { WatchPartyBar } from '../components/WatchPartyBar';
+import { useCast } from '../context/CastContext';
+import { useWatchParty } from '../context/WatchPartyContext';
 
 type VideoPlayerRouteProp = RouteProp<RootStackParamList, 'VideoPlayer'>;
 
@@ -192,7 +205,12 @@ export function VideoPlayerScreen() {
   const route = useRoute<VideoPlayerRouteProp>();
   const initialItem = route.params.item;
   const initialStartPosition = route.params.startPosition ?? 0;
+  const watchPartyRoomId = route.params.watchPartyRoomId;
   const insets = useSafeAreaInsets();
+
+  // ── Cast & Watch Party ────────────────────────────────────────────────────
+  const { notifyAirPlay, castState } = useCast();
+  const party = useWatchParty();
   const { width: windowW, height: windowH } = useWindowDimensions();
   // Compact right sheet — wide enough for episode cards, not a half-screen slab
   const episodesPanelW = Math.min(300, Math.max(280, Math.round(windowW * 0.32)));
@@ -317,12 +335,119 @@ export function VideoPlayerScreen() {
     sliderSeedRef.current = pos;
     setSliderResetKey((k) => k + 1);
   }, []);
+
+  // ── Subtitle system ───────────────────────────────────────────────────────
+  const subtitles = useSubtitles(currentTime, isPlaying);
+
+  // ── Subtitle panel state ──────────────────────────────────────────────────
+  const [subtitleOpen, setSubtitleOpen] = useState(false);
+  const subtitleOpenRef = useRef(false);
+  useEffect(() => { subtitleOpenRef.current = subtitleOpen; }, [subtitleOpen]);
+
+  // Style prefs (persisted in component lifetime — survive panel open/close)
+  const [subStyle, setSubStyle] = useState<SubtitleStyleConfig>({
+    fontSize: 16,
+    fontWeight: 'semibold',
+    bgOpacity: 0.78,
+  });
+  // Vertical offset from bottom in px — draggable by the user
+  const [subBottomOffset, setSubBottomOffset] = useState(72);
+
+  // Auto-fetch via OpenSubtitles
+  const [subSearchLang, setSubSearchLang] = useState('en');
+  const [subSearchResults, setSubSearchResults] = useState<SubtitleHit[]>([]);
+  const [subSearchState, setSubSearchState] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
+  const [subDownloadingId, setSubDownloadingId] = useState<number | null>(null);
+  const [subSearchError, setSubSearchError] = useState<string | null>(null);
+  const [subLangPickerOpen, setSubLangPickerOpen] = useState(false);
+  // Which tab is shown inside the subtitle panel
+  const [subTab, setSubTab] = useState<'load' | 'style' | 'search'>('load');
+
+  const handleSubtitleSearch = useCallback(async () => {
+    const q = item.title;
+    setSubSearchState('loading');
+    setSubSearchError(null);
+    setSubSearchResults([]);
+    try {
+      const results = await searchSubtitles({
+        query: q,
+        tmdbId: item.id,
+        season: activeFile?.seasonNumber,
+        episode: activeFile?.episodeNumber,
+        language: subSearchLang,
+      });
+      setSubSearchResults(results);
+      setSubSearchState('done');
+    } catch (e: unknown) {
+      setSubSearchError(e instanceof Error ? e.message : 'Search failed');
+      setSubSearchState('error');
+    }
+  }, [subSearchLang, item, activeFile]);
+
+  const handleSubtitleDownload = useCallback(async (hit: SubtitleHit) => {
+    setSubDownloadingId(hit.fileId);
+    try {
+      const cues = await downloadSubtitleCues(hit.fileId);
+      // Inject directly into the subtitles hook via its internal setter
+      // (we do this by clearing + re-loading via the hook's public API)
+      subtitles.injectCues(cues, hit.fileName);
+    } catch (e: unknown) {
+      setSubSearchError(e instanceof Error ? e.message : 'Download failed');
+    } finally {
+      setSubDownloadingId(null);
+    }
+  }, [subtitles]);
+
   const [episodesOpen, setEpisodesOpen] = useState(false);
-  const [audioOpen, setAudioOpen] = useState(false);
   const episodesOpenRef = useRef(false);
-  const audioOpenRef = useRef(false);
+  const audioOpenRef = useRef(false); // keeping ref for auto-hide guard compatibility
   useEffect(() => { episodesOpenRef.current = episodesOpen; }, [episodesOpen]);
-  useEffect(() => { audioOpenRef.current = audioOpen; }, [audioOpen]);
+
+  // ── Subtitle persistence ──────────────────────────────────────────────────
+  // Auto-load: when the active file changes, check if we have a saved SRT for it
+  useEffect(() => {
+    if (!activeFile?.uri) return;
+    void (async () => {
+      const saved = await subtitleStorageService.load(activeFile.uri);
+      if (!saved) return;
+      // Re-read the SRT file from the saved URI and inject
+      try {
+        const FileSystem = await import('expo-file-system/legacy');
+        const info = await FileSystem.getInfoAsync(saved.srtUri);
+        if (!info.exists) {
+          // File was moved/deleted — clean up the stale record
+          await subtitleStorageService.clear(activeFile.uri);
+          return;
+        }
+        const content = await FileSystem.readAsStringAsync(saved.srtUri, {
+          encoding: FileSystem.EncodingType.UTF8,
+        });
+        const { parseSRT } = await import('../utils/srtParser');
+        const cues = parseSRT(content);
+        if (cues.length > 0) {
+          subtitles.injectCues(cues, saved.filename);
+        }
+      } catch {
+        // Silently skip — stale cache URI or file system error
+      }
+    })();
+  // Only re-run when the active file changes, not on every subtitle state change
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeFile?.uri]);
+
+  // Auto-save: when a new SRT file is picked from device, persist the association
+  useEffect(() => {
+    if (!activeFile?.uri || !subtitles.srtUri || !subtitles.filename) return;
+    void subtitleStorageService.save(activeFile.uri, subtitles.srtUri, subtitles.filename);
+  }, [subtitles.srtUri, activeFile?.uri, subtitles.filename]);
+
+  // Auto-clear persistence when user explicitly removes subtitles
+  const handleClearSubtitles = useCallback(() => {
+    subtitles.clearSubtitles();
+    if (activeFile?.uri) {
+      void subtitleStorageService.clear(activeFile.uri);
+    }
+  }, [subtitles, activeFile?.uri]);
 
   // ── Season/scroll effects (episodesOpen must be declared above these) ────
   // Reset season to the playing episode's season when panel opens
@@ -644,9 +769,46 @@ export function VideoPlayerScreen() {
       // Lock slider max once duration is first known — prevents native thumb jump
       if (d > 0 && sliderMaxRef.current === 0) sliderMaxRef.current = d;
       if (nextEpisode && d > 0 && t >= d - 30 && t < d - 0.5) setShowNextUp(true);
+      // ── Notify watch party context with fresh playback state ──────────────
+      party.notifyPlayback(t, d, player.playing, false);
     }, 250);
     return () => clearInterval(interval);
-  }, [player, isSeeking, nextEpisode]);
+  }, [player, isSeeking, nextEpisode, party]);
+
+  // ── Watch Party: register PlayerBridge so context can seek/play guests ────
+  useEffect(() => {
+    if (!player) { party.registerPlayer(null); return; }
+    party.registerPlayer({
+      getPosition: () => { try { return player.currentTime; } catch { return 0; } },
+      getDuration: () => { try { return player.duration || 0; } catch { return 0; } },
+      seek: (pos) => { try { player.currentTime = pos; setCurrentTime(pos); teleportSlider(pos); } catch { /* ignore */ } },
+      setPlaying: (play) => {
+        try {
+          if (play && !player.playing) { player.play(); setIsPlaying(true); }
+          else if (!play && player.playing) { player.pause(); setIsPlaying(false); }
+        } catch { /* ignore */ }
+      },
+    });
+    return () => { party.registerPlayer(null); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [player]);
+
+  // ── Watch Party: auto-join room if navigated here from WatchPartyScreen ───
+  useEffect(() => {
+    if (!watchPartyRoomId || party.isInParty) return;
+    party.joinParty(watchPartyRoomId, initialItem).catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [watchPartyRoomId]);
+
+  // ── Cast: notify context when AirPlay external route becomes active ────────
+  useEffect(() => {
+    if (!player) return;
+    // expo-video fires 'externalPlaybackChange' on iOS when AirPlay connects
+    const sub = (player as any).addListener?.('externalPlaybackChange', ({ isExternalPlaybackActive }: { isExternalPlaybackActive: boolean }) => {
+      notifyAirPlay(isExternalPlaybackActive);
+    });
+    return () => { sub?.remove?.(); };
+  }, [player, notifyAirPlay]);
 
   // ── Auto-hide controls ────────────────────────────────────────────────────
   const scheduleHide = useCallback(() => {
@@ -658,7 +820,7 @@ export function VideoPlayerScreen() {
       if (!isMountedRef.current) return;
       // Re-read player.playing at fire time — never hide while paused.
       // Use refs for panel state so opening/closing panels doesn't reschedule this timer.
-      if (player?.playing && !episodesOpenRef.current && !audioOpenRef.current) {
+      if (player?.playing && !episodesOpenRef.current && !audioOpenRef.current && !subtitleOpenRef.current) {
         setShowControls(false);
         overlayOpacity.value = withTiming(0, { duration: 500 });
         trackH.value = withTiming(2, { duration: 500 });
@@ -841,6 +1003,8 @@ export function VideoPlayerScreen() {
     // Resume play after seek if was playing
     if (isPlaying) player.play();
     revealControls();
+    // Snap subtitle cue to the new position immediately
+    subtitles.seek(value);
   };
 
   const playEpisode = (file: LocalFile) => {
@@ -933,6 +1097,14 @@ export function VideoPlayerScreen() {
         <View style={styles.zones} />
       </GestureDetector>
 
+      {/* Subtitle overlay — zIndex 4, sits above video + gesture zones, below controls */}
+      <SubtitleOverlay
+        cue={subtitles.activeCue}
+        subtitleStyle={subStyle}
+        bottomOffset={showControls && subBottomOffset < 106 ? 106 : subBottomOffset}
+        horizontalPadding={padH}
+      />
+
       {/* Gesture HUD — zIndex 5, pointer-events none */}
       {/* Volume HUD — always on the right side */}
       {gestureHud !== null && (
@@ -942,6 +1114,16 @@ export function VideoPlayerScreen() {
       )}
 
       {/* Skip flash removed — double-tap still works, no overlay shown */}
+
+      {/* Watch Party Bar — floats above video, below controls */}
+      <WatchPartyBar
+        visible={showControls}
+        onPress={() => {
+          if (party.room) {
+            navigation.navigate('WatchParty', { roomId: party.room.roomId, item });
+          }
+        }}
+      />
 
       {/* Controls overlay — always mounted, fades in/out via overlayOpacity */}
       <Animated.View
@@ -960,6 +1142,8 @@ export function VideoPlayerScreen() {
             </Pressable>
             <Text style={styles.topTitle} numberOfLines={1}>{topTitle}</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 16 }}>
+              {/* Cast to TV */}
+              <CastButton item={item} currentPosition={currentTime} size={20} color="#ffffff" />
               {/* Mute button */}
               <Pressable onPress={toggleMute} hitSlop={14} style={styles.topIconBtn}>
                 {muted 
@@ -1056,10 +1240,10 @@ export function VideoPlayerScreen() {
               <View style={styles.actionBtn} pointerEvents="none" />
             )}
 
-            {/* Audio & Subtitles */}
-            <Pressable style={styles.actionBtn} onPress={() => { setAudioOpen(true); if (hideControlsTimeout.current) clearTimeout(hideControlsTimeout.current); }}>
-              <Captions size={20} color="#ffffff" strokeWidth={1.8} />
-              <Text style={styles.actionLabel} numberOfLines={1}>Audio & Subtitles</Text>
+            {/* Subtitles */}
+            <Pressable style={styles.actionBtn} onPress={() => { setSubtitleOpen(true); if (hideControlsTimeout.current) clearTimeout(hideControlsTimeout.current); }}>
+              <Captions size={20} color={subtitles.loadState === 'ready' && subtitles.enabled ? NF_RED : '#ffffff'} strokeWidth={1.8} />
+              <Text style={[styles.actionLabel, subtitles.loadState === 'ready' && subtitles.enabled && { color: NF_RED }]} numberOfLines={1}>Subtitles</Text>
             </Pressable>
 
             {/* Next episode */}
@@ -1084,6 +1268,14 @@ export function VideoPlayerScreen() {
           entering={FadeInUp.duration(280)}
           style={[styles.nextUpCard, { bottom: padBot + 16, right: padH }]}
         >
+          {/* Dismiss X */}
+          <Pressable
+            onPress={() => setShowNextUp(false)}
+            hitSlop={10}
+            style={styles.nextUpDismiss}
+          >
+            <X size={14} color="#71717a" strokeWidth={2.5} />
+          </Pressable>
           <Text style={styles.nextUpLabel}>Next Episode</Text>
           <Text style={styles.nextUpTitle} numberOfLines={2}>{nextEpisodeLabel}</Text>
           <NextUpCountdownBar onComplete={handleNextEpisode} />
@@ -1265,98 +1457,341 @@ export function VideoPlayerScreen() {
         </View>
       </Modal>
 
-      {/* ── Audio & Subtitles panel — slides in from the RIGHT ── */}
+      {/* ── Subtitles panel — slides in from the RIGHT ── */}
       <Modal
-        visible={audioOpen}
+        visible={subtitleOpen}
         transparent
         animationType="fade"
-        onRequestClose={() => setAudioOpen(false)}
+        onRequestClose={() => { setSubtitleOpen(false); if (player?.playing) scheduleHide(); }}
         statusBarTranslucent
       >
         <View style={styles.sideModalRoot}>
-          <Pressable style={styles.sideBackdrop} onPress={() => { setAudioOpen(false); if (player?.playing) scheduleHide(); }} />
+          <Pressable style={styles.sideBackdrop} onPress={() => { setSubtitleOpen(false); setSubLangPickerOpen(false); if (player?.playing) scheduleHide(); }} />
           <Animated.View
             entering={SlideInRight.duration(280)}
             exiting={SlideOutRight.duration(220)}
-            style={[
-              styles.sidePanel,
-              {
-                width: episodesPanelW,
-                paddingTop: Math.max(insets.top, 0),
-                paddingBottom: padBot + 12,
-              },
-            ]}
+            style={[styles.sidePanel, { width: Math.min(320, Math.max(300, Math.round(episodesPanelW * 1.05))) }]}
           >
-            {/* Header */}
+            {/* ── Header ── */}
             <View style={[styles.panelHeaderWrap, { paddingTop: Math.max(insets.top, 16) }]}>
               <BlurView intensity={60} tint="dark" style={StyleSheet.absoluteFillObject} />
               <View style={styles.panelHeaderInner}>
                 <View style={styles.panelHeaderText}>
-                  <Text style={styles.panelTitle}>Audio & Subtitles</Text>
-                  <Text style={styles.panelSubtitle} numberOfLines={1}>{topTitle}</Text>
+                  <Text style={styles.panelTitle}>Subtitles</Text>
+                  <Text style={styles.panelSubtitle} numberOfLines={1}>
+                    {subtitles.loadState === 'ready' ? `${subtitles.cueCount} cues · ${subtitles.filename ?? ''}` : topTitle}
+                  </Text>
                 </View>
-                <Pressable onPress={() => { setAudioOpen(false); if (player?.playing) scheduleHide(); }} style={styles.panelCloseBtn} hitSlop={10}>
+                <Pressable onPress={() => { setSubtitleOpen(false); setSubLangPickerOpen(false); if (player?.playing) scheduleHide(); }} style={styles.panelCloseBtn} hitSlop={10}>
                   <X size={18} color="#a1a1aa" />
                 </Pressable>
               </View>
+
+              {/* ── Tab bar: Load / Style / Search ── */}
+              <View style={styles.subTabBar}>
+                {(['load', 'style', 'search'] as const).map((tab) => (
+                  <Pressable
+                    key={tab}
+                    style={[styles.subTab, subTab === tab && styles.subTabActive]}
+                    onPress={() => setSubTab(tab)}
+                  >
+                    <Text style={[styles.subTabText, subTab === tab && styles.subTabTextActive]}>
+                      {tab === 'load' ? 'Load SRT' : tab === 'style' ? 'Style' : 'Auto-Fetch'}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+
               <View style={styles.panelHeaderDivider} />
             </View>
 
             <ScrollView
               style={styles.panelScroll}
-              contentContainerStyle={styles.panelScrollContent}
+              contentContainerStyle={[styles.panelScrollContent, { paddingBottom: Math.max(padBot, 24) + 12 }]}
               showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
             >
-              {/* ── Audio ── */}
-              <Text style={styles.audioSectionLabel}>Audio</Text>
 
-              {/* Track info */}
-              <View style={styles.audioInfoRow}>
-                <View style={styles.audioInfoIcon}>
-                  <Volume2 size={16} color="#52525b" />
-                </View>
-                <View style={styles.audioInfoText}>
-                  <Text style={styles.audioTrackLabel}>Audio track switching not currently available</Text>
-                  <Text style={styles.audioTrackSub}>Plays the default audio track embedded in the local file</Text>
-                </View>
-              </View>
+              {/* ══════════════ LOAD TAB ══════════════ */}
+              {subTab === 'load' && (
+                <>
+                  {/* Pick SRT from device */}
+                  <Text style={styles.audioSectionLabel}>From Device</Text>
+                  <Pressable
+                    style={({ pressed }) => [styles.audioOptionRow, { opacity: pressed ? 0.7 : 1 }]}
+                    onPress={subtitles.pickSubtitleFile}
+                  >
+                    <View style={[styles.audioOptionIcon, subtitles.loadState === 'ready' && styles.audioOptionIconActive]}>
+                      <Captions size={16} color={subtitles.loadState === 'ready' ? NF_RED : '#a1a1aa'} />
+                    </View>
+                    <View style={{ flex: 1, gap: 2 }}>
+                      <Text style={styles.audioOptionText}>
+                        {subtitles.loadState === 'loading' ? 'Opening…' : subtitles.loadState === 'ready' ? (subtitles.filename ?? 'Subtitle loaded') : 'Load .srt file…'}
+                      </Text>
+                      {subtitles.loadState === 'ready' && <Text style={styles.audioTrackSub}>{subtitles.cueCount} cues · tap to replace</Text>}
+                      {subtitles.loadState === 'idle' && <Text style={styles.audioTrackSub}>Pick a .srt subtitle file from your device</Text>}
+                      {subtitles.loadState === 'error' && <Text style={[styles.audioTrackSub, { color: '#f87171' }]}>{subtitles.error}</Text>}
+                    </View>
+                  </Pressable>
 
-              {/* ── Subtitles ── */}
-              <Text style={[styles.audioSectionLabel, { marginTop: 24 }]}>Subtitles</Text>
-
-              <View style={styles.audioInfoRow}>
-                <View style={styles.audioInfoIcon}>
-                  <Captions size={16} color="#52525b" />
-                </View>
-                <View style={styles.audioInfoText}>
-                  <Text style={styles.audioTrackLabel}>Subtitles not currently available</Text>
-                  <Text style={styles.audioTrackSub}>Subtitle track selection is not supported in this version</Text>
-                </View>
-              </View>
-
-              {/* ── Playback speed ── */}
-              <Text style={[styles.audioSectionLabel, { marginTop: 24 }]}>Playback Speed</Text>
-
-              <View style={styles.speedGrid}>
-                {[0.75, 1, 1.25, 1.5, 2].map((r) => {
-                  const active = playbackSpeed === r;
-                  return (
+                  {/* Enable / disable */}
+                  {subtitles.loadState === 'ready' && (
                     <Pressable
-                      key={r}
-                      style={[styles.speedTile, active && styles.speedTileActive]}
-                      onPress={() => setSpeed(r)}
+                      style={({ pressed }) => [styles.audioOptionRow, { opacity: pressed ? 0.7 : 1, marginTop: 6 }]}
+                      onPress={subtitles.toggleEnabled}
                     >
-                      {active && (
-                        <BlurView intensity={0} tint="dark" style={StyleSheet.absoluteFillObject} />
-                      )}
-                      <Gauge size={13} color={active ? '#000000' : '#71717a'} strokeWidth={2} />
-                      <Text style={[styles.speedTileText, active && styles.speedTileTextActive]}>
-                        {r === 1 ? '1×' : `${r}×`}
+                      <View style={[styles.audioOptionIcon, subtitles.enabled && styles.audioOptionIconActive]}>
+                        {subtitles.enabled ? <Check size={16} color={NF_RED} strokeWidth={2.5} /> : <X size={16} color="#52525b" strokeWidth={2} />}
+                      </View>
+                      <Text style={[styles.audioOptionText, !subtitles.enabled && styles.audioOptionTextMuted]}>
+                        {subtitles.enabled ? 'Subtitles on' : 'Subtitles off'}
                       </Text>
                     </Pressable>
-                  );
-                })}
-              </View>
+                  )}
+
+                  {/* Clear */}
+                  {subtitles.loadState === 'ready' && (
+                    <Pressable
+                      style={({ pressed }) => [styles.audioOptionRow, { opacity: pressed ? 0.7 : 1, marginTop: 6 }]}
+                      onPress={handleClearSubtitles}
+                    >
+                      <View style={styles.audioOptionIcon}>
+                        <X size={16} color="#52525b" strokeWidth={2} />
+                      </View>
+                      <Text style={[styles.audioOptionText, styles.audioOptionTextMuted]}>Remove subtitles</Text>
+                    </Pressable>
+                  )}
+
+                  {/* Playback speed — moved here from the old Audio panel */}
+                  <Text style={[styles.audioSectionLabel, { marginTop: 24 }]}>Playback Speed</Text>
+                  <View style={styles.speedGrid}>
+                    {[0.75, 1, 1.25, 1.5, 2].map((r) => {
+                      const active = playbackSpeed === r;
+                      return (
+                        <Pressable key={r} style={[styles.speedTile, active && styles.speedTileActive]} onPress={() => setSpeed(r)}>
+                          {active && <BlurView intensity={0} tint="dark" style={StyleSheet.absoluteFillObject} />}
+                          <Gauge size={13} color={active ? '#000000' : '#71717a'} strokeWidth={2} />
+                          <Text style={[styles.speedTileText, active && styles.speedTileTextActive]}>{r === 1 ? '1×' : `${r}×`}</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </>
+              )}
+
+              {/* ══════════════ STYLE TAB ══════════════ */}
+              {subTab === 'style' && (
+                <>
+                  {/* Font size */}
+                  <Text style={styles.audioSectionLabel}>Font Size</Text>
+                  <View style={styles.subStyleRow}>
+                    <Text style={styles.subStyleValueLabel}>{subStyle.fontSize ?? 16}px</Text>
+                    <Slider
+                      style={{ flex: 1, height: 36 }}
+                      minimumValue={12}
+                      maximumValue={28}
+                      step={1}
+                      value={subStyle.fontSize ?? 16}
+                      onValueChange={(v) => setSubStyle((s) => ({ ...s, fontSize: Math.round(v) }))}
+                      minimumTrackTintColor={NF_RED}
+                      maximumTrackTintColor="rgba(255,255,255,0.18)"
+                      thumbTintColor="#ffffff"
+                    />
+                  </View>
+
+                  {/* Font weight */}
+                  <Text style={[styles.audioSectionLabel, { marginTop: 20 }]}>Font Weight</Text>
+                  <View style={styles.subWeightGrid}>
+                    {(['normal', 'semibold', 'bold'] as SubtitleFontWeight[]).map((w) => (
+                      <Pressable
+                        key={w}
+                        style={[styles.subWeightTile, subStyle.fontWeight === w && styles.subWeightTileActive]}
+                        onPress={() => setSubStyle((s) => ({ ...s, fontWeight: w }))}
+                      >
+                        <Text style={[
+                          styles.subWeightTileText,
+                          { fontWeight: w === 'normal' ? '400' : w === 'semibold' ? '600' : '700' },
+                          subStyle.fontWeight === w && styles.subWeightTileTextActive,
+                        ]}>
+                          {w.charAt(0).toUpperCase() + w.slice(1)}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+
+                  {/* Background opacity */}
+                  <Text style={[styles.audioSectionLabel, { marginTop: 20 }]}>Background</Text>
+                  <View style={styles.subWeightGrid}>
+                    {([{ v: 0 as SubtitleBgOpacity, label: 'None' }, { v: 0.45 as SubtitleBgOpacity, label: 'Dim' }, { v: 0.78 as SubtitleBgOpacity, label: 'Solid' }]).map(({ v, label }) => (
+                      <Pressable
+                        key={label}
+                        style={[styles.subWeightTile, subStyle.bgOpacity === v && styles.subWeightTileActive]}
+                        onPress={() => setSubStyle((s) => ({ ...s, bgOpacity: v }))}
+                      >
+                        <Text style={[styles.subWeightTileText, subStyle.bgOpacity === v && styles.subWeightTileTextActive]}>{label}</Text>
+                      </Pressable>
+                    ))}
+                  </View>
+
+                  {/* Vertical position drag */}
+                  <Text style={[styles.audioSectionLabel, { marginTop: 20 }]}>Vertical Position</Text>
+                  <View style={styles.subStyleRow}>
+                    <Text style={styles.subStyleValueLabel}>{subBottomOffset}px</Text>
+                    <Slider
+                      style={{ flex: 1, height: 36 }}
+                      minimumValue={5}
+                      maximumValue={Math.round(windowH * 0.79)}
+                      step={4}
+                      value={subBottomOffset}
+                      onValueChange={(v) => setSubBottomOffset(Math.round(v))}
+                      minimumTrackTintColor={NF_RED}
+                      maximumTrackTintColor="rgba(255,255,255,0.18)"
+                      thumbTintColor="#ffffff"
+                    />
+                  </View>
+                  <View style={styles.subPositionHint}>
+                    <MoveVertical size={14} color="#52525b" strokeWidth={1.8} />
+                    <Text style={styles.subPositionHintText}>Drag the slider to position subtitles anywhere on screen</Text>
+                  </View>
+
+                  {/* Live preview pill */}
+                  <Text style={[styles.audioSectionLabel, { marginTop: 20 }]}>Preview</Text>
+                  <View style={styles.subPreviewWrap}>
+                    <View style={[
+                      styles.subPreviewPill,
+                      { backgroundColor: subStyle.bgOpacity === 0 ? 'transparent' : `rgba(8,8,10,${subStyle.bgOpacity ?? 0.78})` },
+                    ]}>
+                      <Text
+                        style={{
+                          color: '#ffffff',
+                          fontSize: subStyle.fontSize ?? 16,
+                          fontWeight: subStyle.fontWeight === 'normal' ? '400' : subStyle.fontWeight === 'semibold' ? '600' : '700',
+                          textAlign: 'center',
+                          textShadowColor: 'rgba(0,0,0,0.85)',
+                          textShadowOffset: { width: 0, height: 1 },
+                          textShadowRadius: 3,
+                        }}
+                        allowFontScaling={false}
+                      >
+                        The quick brown fox
+                      </Text>
+                    </View>
+                  </View>
+                </>
+              )}
+
+              {/* ══════════════ AUTO-FETCH TAB ══════════════ */}
+              {subTab === 'search' && (
+                <>
+                  <Text style={styles.audioSectionLabel}>Language</Text>
+
+                  {/* Language picker */}
+                  <View style={{ position: 'relative', zIndex: 30, marginBottom: 12 }}>
+                    <Pressable
+                      style={[styles.audioOptionRow, subLangPickerOpen && { borderColor: 'rgba(229,9,20,0.4)', backgroundColor: 'rgba(229,9,20,0.06)' }]}
+                      onPress={() => setSubLangPickerOpen((v) => !v)}
+                    >
+                      <View style={styles.audioOptionIcon}>
+                        <AlignCenter size={15} color="#a1a1aa" strokeWidth={2} />
+                      </View>
+                      <Text style={styles.audioOptionText}>
+                        {SUBTITLE_LANGUAGES.find((l) => l.code === subSearchLang)?.label ?? subSearchLang}
+                      </Text>
+                      <ChevronDown size={14} color="#71717a" strokeWidth={2.5}
+                        style={{ transform: [{ rotate: subLangPickerOpen ? '180deg' : '0deg' }] }}
+                      />
+                    </Pressable>
+
+                    {subLangPickerOpen && (
+                      <Animated.View entering={FadeIn.duration(130)} style={styles.subLangDropdown}>
+                        <ScrollView style={{ maxHeight: 220 }} showsVerticalScrollIndicator={false}>
+                          {SUBTITLE_LANGUAGES.map((lang) => (
+                            <Pressable
+                              key={lang.code}
+                              style={[styles.subLangItem, lang.code === subSearchLang && styles.subLangItemActive]}
+                              onPress={() => { setSubSearchLang(lang.code); setSubLangPickerOpen(false); }}
+                            >
+                              {lang.code === subSearchLang && <View style={styles.seasonDropdownActiveDot} />}
+                              <Text style={[styles.subLangItemText, lang.code === subSearchLang && { color: '#ffffff', fontWeight: '700' }]}>
+                                {lang.label}
+                              </Text>
+                            </Pressable>
+                          ))}
+                        </ScrollView>
+                      </Animated.View>
+                    )}
+                  </View>
+
+                  {/* Search bar */}
+                  <Text style={styles.audioSectionLabel}>Search</Text>
+                  <View style={styles.subSearchRow}>
+                    <Pressable
+                      style={({ pressed }) => [styles.subSearchBtn, { opacity: pressed ? 0.75 : 1 }]}
+                      onPress={handleSubtitleSearch}
+                    >
+                      <Search size={15} color="#ffffff" strokeWidth={2} />
+                      <Text style={styles.subSearchBtnText}>
+                        {subSearchState === 'loading' ? 'Searching…' : 'Search'}
+                      </Text>
+                    </Pressable>
+                  </View>
+                  <Text style={styles.audioTrackSub}>
+                    Searching for: <Text style={{ color: '#a1a1aa' }}>{item.title}{activeFile?.seasonNumber != null ? ` S${activeFile.seasonNumber}E${activeFile.episodeNumber ?? ''}` : ''}</Text>
+                  </Text>
+
+                  {/* Error */}
+                  {subSearchState === 'error' && (
+                    <View style={[styles.audioInfoRow, { marginTop: 12 }]}>
+                      <Text style={[styles.audioTrackSub, { color: '#f87171', flex: 1 }]}>{subSearchError}</Text>
+                    </View>
+                  )}
+
+                  {/* Results */}
+                  {subSearchState === 'done' && subSearchResults.length === 0 && (
+                    <View style={styles.panelEmptyWrap}>
+                      <Search size={28} color="#3f3f46" strokeWidth={1.5} />
+                      <Text style={styles.panelEmpty}>No subtitles found.{'\n'}Try a different language or check the title.</Text>
+                    </View>
+                  )}
+
+                  {subSearchResults.length > 0 && (
+                    <>
+                      <Text style={[styles.audioSectionLabel, { marginTop: 16 }]}>{subSearchResults.length} Results</Text>
+                      {subSearchResults.map((hit) => {
+                        const isDownloading = subDownloadingId === hit.fileId;
+                        const isLoaded = subtitles.loadState === 'ready' && subtitles.filename === hit.fileName;
+                        return (
+                          <Pressable
+                            key={`${hit.fileId}`}
+                            style={({ pressed }) => [
+                              styles.subResultRow,
+                              isLoaded && styles.subResultRowActive,
+                              { opacity: pressed ? 0.75 : 1 },
+                            ]}
+                            onPress={() => !isDownloading && handleSubtitleDownload(hit)}
+                          >
+                            <View style={[styles.audioOptionIcon, isLoaded && styles.audioOptionIconActive]}>
+                              {isLoaded
+                                ? <Check size={15} color={NF_RED} strokeWidth={2.5} />
+                                : isDownloading
+                                ? <Download size={15} color="#71717a" strokeWidth={2} />
+                                : <Download size={15} color="#a1a1aa" strokeWidth={2} />}
+                            </View>
+                            <View style={{ flex: 1, gap: 3 }}>
+                              <Text style={styles.audioOptionText} numberOfLines={2}>{hit.release || hit.fileName}</Text>
+                              <Text style={styles.audioTrackSub}>
+                                {hit.language.toUpperCase()} · {hit.downloads.toLocaleString()} downloads
+                                {hit.rating > 0 ? ` · ★ ${hit.rating.toFixed(1)}` : ''}
+                              </Text>
+                            </View>
+                          </Pressable>
+                        );
+                      })}
+                    </>
+                  )}
+                </>
+              )}
+
             </ScrollView>
           </Animated.View>
         </View>
@@ -1491,6 +1926,12 @@ const styles = StyleSheet.create({
     paddingVertical: 8, borderRadius: 4,
   },
   nextUpBtnText: { color: '#000000', fontSize: 13, fontWeight: '800' },
+  nextUpDismiss: {
+    position: 'absolute', top: 8, right: 8,
+    width: 22, height: 22, borderRadius: 11,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center', justifyContent: 'center',
+  },
 
   // Lock hint toast
   lockHint: {
@@ -1670,6 +2111,11 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.06)',
     alignItems: 'center', justifyContent: 'center',
   },
+  audioOptionIconActive: {
+    backgroundColor: 'rgba(229,9,20,0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(229,9,20,0.3)',
+  },
   audioOptionText: { flex: 1, color: '#ffffff', fontSize: 14, fontWeight: '600' },
   audioOptionTextMuted: { color: '#71717a' },
   audioInfoRow: {
@@ -1792,5 +2238,171 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
     fontVariant: ['tabular-nums'],
+  },
+
+  // ── Subtitle panel ────────────────────────────────────────────────────────
+  subTabBar: {
+    flexDirection: 'row',
+    gap: 6,
+    marginTop: 12,
+  },
+  subTab: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 7,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.07)',
+  },
+  subTabActive: {
+    backgroundColor: 'rgba(229,9,20,0.15)',
+    borderColor: 'rgba(229,9,20,0.4)',
+  },
+  subTabText: {
+    color: '#71717a',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  subTabTextActive: {
+    color: '#ffffff',
+  },
+
+  // Style tab
+  subStyleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 4,
+  },
+  subStyleValueLabel: {
+    color: '#a1a1aa',
+    fontSize: 12,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+    minWidth: 36,
+    textAlign: 'right',
+  },
+  subWeightGrid: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  subWeightTile: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 11,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  subWeightTileActive: {
+    backgroundColor: '#ffffff',
+    borderColor: '#ffffff',
+  },
+  subWeightTileText: {
+    color: '#71717a',
+    fontSize: 12,
+  },
+  subWeightTileTextActive: {
+    color: '#000000',
+  },
+  subPositionHint: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 4,
+  },
+  subPositionHintText: {
+    color: '#3f3f46',
+    fontSize: 11,
+    fontWeight: '500',
+    flex: 1,
+    lineHeight: 16,
+  },
+  subPreviewWrap: {
+    alignItems: 'center',
+    paddingVertical: 18,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
+  },
+  subPreviewPill: {
+    borderRadius: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+  },
+
+  // Auto-fetch tab
+  subSearchRow: {
+    marginBottom: 8,
+  },
+  subSearchBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: NF_RED,
+  },
+  subSearchBtnText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  subLangDropdown: {
+    position: 'absolute',
+    top: '100%',
+    left: 0,
+    right: 0,
+    marginTop: 4,
+    backgroundColor: '#141416',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.75,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 48,
+    zIndex: 60,
+  },
+  subLangItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255,255,255,0.06)',
+  },
+  subLangItemActive: {
+    backgroundColor: 'rgba(229,9,20,0.10)',
+  },
+  subLangItemText: {
+    color: '#a1a1aa',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  subResultRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 11,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    marginBottom: 6,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.07)',
+  },
+  subResultRowActive: {
+    backgroundColor: 'rgba(229,9,20,0.07)',
+    borderColor: 'rgba(229,9,20,0.3)',
   },
 });

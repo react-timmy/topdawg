@@ -8,10 +8,12 @@
  *  1. Mount: reads stored account, subscribes to Firebase auth state.
  *  2. If account + sync_pending → retryPendingSync in background.
  *  3. Registers push hooks:
- *       - setOnEventWritten  → pushes every new WatchEvent to Firestore
- *       - setOnProfileSaved  → pushes profile edits to Firestore
- *       - setOnPosterResolved → pushes poster cache entries to Firestore
- *  4. signIn(): Google Sign-In → initialSync (profile + memories + history) → startListener.
+ *       - setOnEventWritten    → pushes every new WatchEvent to Firestore
+ *       - setOnProfileSaved    → pushes profile edits to Firestore
+ *       - setOnPosterResolved  → pushes poster cache entries to Firestore
+ *       - setOnWatchlistChanged → pushes watchlist add/remove to Firestore
+ *       - setOnStarChanged     → pushes starred/unstarred library items to Firestore
+ *  4. signIn(): Google Sign-In → initialSync (profile + memories + watchlist + history) → startListener.
  *  5. signOut(): tears down listener, clears account, removes all push hooks.
  */
 
@@ -28,6 +30,9 @@ import { authService, FilmSortAccount } from '../services/authService';
 import { syncService, PosterEntry } from '../services/syncService';
 import { setOnEventWritten, setOnPosterResolved } from '../storage/watchHistoryService';
 import { setOnProfileSaved } from '../storage/profileService';
+import { setOnWatchlistChanged } from '../storage/watchlistService';
+import { setOnStarChanged } from '../storage/asyncStorage';
+import { cloudStarredService } from '../storage/cloudStarredService';
 import { ENABLE_CLOUD_SYNC } from '../config/env';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -112,6 +117,36 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
+  // ── Register / deregister the watchlist push hook ────────────────────────────
+  const registerWatchlistHook = useCallback((uid: string | null) => {
+    if (!ENABLE_CLOUD_SYNC || !uid) {
+      setOnWatchlistChanged(null);
+      return;
+    }
+    setOnWatchlistChanged((event) => {
+      if (event.action === 'add') {
+        void syncService.pushWatchlistAdd(uid, event.item);
+      } else {
+        void syncService.pushWatchlistRemove(uid, event.id);
+      }
+    });
+  }, []);
+
+  // ── Register / deregister the starred push hook ──────────────────────────────
+  const registerStarHook = useCallback((uid: string | null) => {
+    if (!ENABLE_CLOUD_SYNC || !uid) {
+      setOnStarChanged(null);
+      return;
+    }
+    setOnStarChanged((event) => {
+      if (event.action === 'starred') {
+        void syncService.pushStarred(uid, event.item);
+      } else {
+        void syncService.pushUnstarred(uid, event.id);
+      }
+    });
+  }, []);
+
   // ── Mount: read stored account + subscribe to Firebase auth state ───────────
   useEffect(() => {
     let cancelled = false;
@@ -127,6 +162,8 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
         registerEventHook(stored.uid);
         registerProfileHook(stored.uid);
         registerPosterHook(stored.uid);
+        registerWatchlistHook(stored.uid);
+        registerStarHook(stored.uid);
 
         // Check for pending sync from last session
         const pending = await AsyncStorage.getItem(SYNC_PENDING_KEY);
@@ -153,6 +190,9 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
         registerEventHook(null);
         registerProfileHook(null);
         registerPosterHook(null);
+        registerWatchlistHook(null);
+        registerStarHook(null);
+        void cloudStarredService.clear();
         listenerUnsubRef.current?.();
         listenerUnsubRef.current = null;
       }
@@ -177,6 +217,8 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
     registerEventHook(newAccount.uid);
     registerProfileHook(newAccount.uid);
     registerPosterHook(newAccount.uid);
+    registerWatchlistHook(newAccount.uid);
+    registerStarHook(newAccount.uid);
 
     // Initial sync — non-blocking; update isSyncing around it
     setIsSyncing(true);
@@ -194,7 +236,7 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
     // Start real-time listener
     listenerUnsubRef.current?.();
     listenerUnsubRef.current = syncService.startListener(newAccount.uid);
-  }, [registerEventHook, registerProfileHook, registerPosterHook]);
+  }, [registerEventHook, registerProfileHook, registerPosterHook, registerWatchlistHook, registerStarHook]);
 
   // ── signOut ────────────────────────────────────────────────────────────────
   const signOut = useCallback(async () => {
@@ -206,9 +248,14 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
     setOnEventWritten(null);
     setOnProfileSaved(null);
     setOnPosterResolved(null);
+    setOnWatchlistChanged(null);
+    setOnStarChanged(null);
 
     // Firebase + Google sign-out + clear stored account
     await authService.signOut();
+
+    // Clear cloud-only starred entries so they don't show for the next user
+    await cloudStarredService.clear();
 
     setAccount(null);
     setSyncPending(false);

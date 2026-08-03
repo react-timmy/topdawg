@@ -6,10 +6,11 @@ export type RootStackParamList = {
   Search: undefined;
   Details: { item: MediaItem };
   Notifications: { initialTab?: 'inbox' | 'upcoming' } | undefined;
-  VideoPlayer: { item: MediaItem; startPosition?: number };
+  VideoPlayer: { item: MediaItem; startPosition?: number; watchPartyRoomId?: string };
   PrivacyPolicy: undefined;
   TermsOfUse: undefined;
   Settings: undefined;
+  WatchParty: { roomId: string; item: MediaItem };
 };
 
 
@@ -39,6 +40,11 @@ export interface MediaItem {
   genre_ids?: number[];
   tagline?: string;
   starred?: boolean;
+  /**
+   * For TV shows: the last episode the user was at when they starred the item.
+   * Stored locally and synced to Firestore so other devices know where to continue.
+   */
+  lastEpisode?: { seasonNumber: number; episodeNumber: number };
   localFile?: LocalFile;
   localFiles?: LocalFile[];
 }
@@ -150,4 +156,94 @@ export interface WatchProgress {
   episodeNumber?: number;
   updatedAt: string;
   lastPlayedAt?: string;
+}
+
+// ─── Cast ─────────────────────────────────────────────────────────────────────
+
+/** Which casting technology is active. */
+export type CastTechnology = 'chromecast' | 'airplay';
+
+export type CastSessionState =
+  | 'idle'          // no cast session
+  | 'connecting'    // attempting to connect to a device
+  | 'connected'     // cast session active, media may or may not be loaded
+  | 'disconnecting';
+
+export interface CastDevice {
+  deviceId: string;
+  friendlyName: string;
+  technology: CastTechnology;
+  modelName?: string;
+}
+
+export interface CastState {
+  sessionState: CastSessionState;
+  connectedDevice: CastDevice | null;
+  /** 0–1, mirrors what's playing on the cast receiver */
+  remotePosition: number;
+  remoteDuration: number;
+  remoteIsPlaying: boolean;
+}
+
+// ─── Watch Party ──────────────────────────────────────────────────────────────
+
+export type WatchPartyRole = 'host' | 'guest';
+
+export type WatchPartyStatus = 'lobby' | 'playing' | 'paused' | 'ended';
+
+/** A single member inside a watch party room. */
+export interface WatchPartyMember {
+  uid: string;
+  displayName: string;
+  photoUrl?: string;
+  role: WatchPartyRole;
+  joinedAt: string;    // ISO-8601
+  /** True while the member's client is buffering / seeking */
+  isBuffering: boolean;
+  /** Last-known heartbeat ISO-8601 — used to detect disconnected members */
+  lastSeen: string;
+}
+
+/** A chat message inside a watch party room. */
+export interface WatchPartyMessage {
+  id: string;
+  uid: string;
+  displayName: string;
+  photoUrl?: string;
+  text: string;
+  sentAt: string;      // ISO-8601
+}
+
+/**
+ * Shared playback state written by the host and read by all guests.
+ * Guests apply it when the delta exceeds SYNC_TOLERANCE_S.
+ */
+export interface WatchPartyPlaybackState {
+  /** Playhead position in seconds at the moment the host wrote this. */
+  positionSeconds: number;
+  /** Wall-clock ISO-8601 when the host wrote the state — used to compensate for latency. */
+  updatedAt: string;
+  isPlaying: boolean;
+  /** Set when the host seeks — causes guests to hard-seek. */
+  seekGeneration: number;
+}
+
+/**
+ * Root document stored at /watchParties/{roomId} in Firestore.
+ */
+export interface WatchPartyRoom {
+  roomId: string;
+  hostUid: string;
+  hostDisplayName: string;
+  status: WatchPartyStatus;
+  item: MediaItem;
+  /** The file the host is playing (null for stream-only items). */
+  activeFileUri?: string | null;
+  playback: WatchPartyPlaybackState;
+  /** ISO-8601 — when the room was created. */
+  createdAt: string;
+  /** ISO-8601 — auto-cleaned after this time by a Cloud Function (or client). */
+  expiresAt: string;
+  /** Max 8 members */
+  memberCount: number;
 }

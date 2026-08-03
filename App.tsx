@@ -7,6 +7,8 @@ import { NotificationProvider } from "./src/context/NotificationContext";
 import { ProProvider } from "./src/context/ProContext";
 import { BadgeUnlockProvider } from "./src/context/BadgeUnlockContext";
 import { AccountProvider } from "./src/context/AccountContext";
+import { CastProvider } from "./src/context/CastContext";
+import { WatchPartyProvider } from "./src/context/WatchPartyContext";
 import { BadgeUnlockOverlay } from "./src/components/BadgeUnlockOverlay";
 import { setupNotificationTapHandler } from "./src/services/notificationService";
 import { RootNavigator } from "./src/navigation/RootNavigator";
@@ -36,21 +38,25 @@ export default function App() {
         <StatusBar style="light" />
         <NotificationProvider>
           <AccountProvider>
-            <ProProvider>
-              <BadgeUnlockProvider>
-                {/*
-                  NavigationContainer handles our routing.
-                  We no longer reset navigation on resume, so users stay where they were unless they cold-boot the app.
-                */}
-                <NavigationContainer
-                  ref={navigationRef}
-                  theme={AppTheme}
-                >
-                  <RootNavigator />
-                </NavigationContainer>
-                <BadgeUnlockOverlay />
-              </BadgeUnlockProvider>
-            </ProProvider>
+            <CastProvider>
+              <WatchPartyProvider>
+                <ProProvider>
+                  <BadgeUnlockProvider>
+                    {/*
+                      NavigationContainer handles our routing.
+                      We no longer reset navigation on resume, so users stay where they were unless they cold-boot the app.
+                    */}
+                    <NavigationContainer
+                      ref={navigationRef}
+                      theme={AppTheme}
+                    >
+                      <RootNavigator />
+                    </NavigationContainer>
+                    <BadgeUnlockOverlay />
+                  </BadgeUnlockProvider>
+                </ProProvider>
+              </WatchPartyProvider>
+            </CastProvider>
           </AccountProvider>
         </NotificationProvider>
       </SafeAreaProvider>
