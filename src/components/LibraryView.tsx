@@ -36,12 +36,15 @@ import {
   Calendar,
   Check,
   Tv2,
+  FolderHeart,
 } from "lucide-react-native";
 import { useNavigation } from "@react-navigation/native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useAccount } from "../context/AccountContext";
 import { MediaItem } from "../types";
 import { CloudStarredEntry } from "../storage/cloudStarredService";
 import { FloatingHeader } from "./FloatingHeader";
-import { watchProgressService } from "../storage/watchProgressService";
+import { watchProgressService, setOnProgressChanged } from "../storage/watchProgressService";
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
 const GRID_ITEM_WIDTH = (SCREEN_WIDTH - 48 - 12) / 2; // 2-col grid with padding and gap
@@ -74,8 +77,8 @@ interface LibraryViewProps {
 // ─── Sort options cycle ───────────────────────────────────────────────────────
 
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
-  { key: "lastPlayed", label: "Last Played" },
   { key: "added", label: "Recently Added" },
+  { key: "lastPlayed", label: "Last Played" },
   { key: "title", label: "Title A–Z" },
   { key: "rating", label: "Top Rated" },
   { key: "year", label: "Release Year" },
@@ -456,14 +459,90 @@ function RemoveConfirmSheet({
  * Shown in the starred tab for items that came from the cloud but have no
  * local file on this device. Info-only: no play button, no delete, no navigation.
  * Shows all available metadata. Unstar button only.
+ *
+ * Supports both "list" (horizontal row) and "grid" (poster card) view modes
+ * to match the app's GridCard design when the user switches to grid view.
  */
 function StarredCard({
   entry,
   onUnstar,
+  viewMode = 'list',
 }: {
   entry: CloudStarredEntry;
   onUnstar: () => void;
+  viewMode?: ViewMode;
 }) {
+  // ── Grid variant — mirrors GridCard layout ──────────────────────────────────
+  if (viewMode === 'grid') {
+    return (
+      <Animated.View
+        entering={FadeInDown.duration(350)}
+        exiting={FadeOutUp.duration(250)}
+        style={styles.gridCard}
+      >
+        <View style={styles.gridPosterWrap}>
+          <Image
+            source={entry.posterUrl ? { uri: entry.posterUrl } : undefined}
+            style={styles.gridPoster}
+            resizeMode="cover"
+          />
+
+          {/* Type pill */}
+          <View
+            style={[
+              styles.typePill,
+              styles.typePillAbsolute,
+              entry.type === 'movie' ? styles.moviePill : styles.tvPill,
+            ]}
+          >
+            {entry.type === 'movie'
+              ? <Film size={9} color="#f59e0b" />
+              : <Tv size={9} color="#60a5fa" />}
+            <Text
+              style={[
+                styles.typePillText,
+                entry.type === 'movie' ? styles.movieText : styles.tvText,
+              ]}
+            >
+              {entry.type === 'movie' ? 'Film' : 'TV'}
+            </Text>
+          </View>
+
+          {/* Rating badge */}
+          {entry.rating !== undefined && entry.rating > 0 && (
+            <View style={styles.ratingBadge}>
+              <Star size={9} color="#4ade80" fill="#4ade80" />
+              <Text style={styles.ratingBadgeText}>{entry.rating.toFixed(1)}</Text>
+            </View>
+          )}
+
+          {/* Episode badge for TV — bottom-left overlay */}
+          {entry.type === 'tv' && entry.lastEpisode && (
+            <View style={styles.starredGridEpisodeBadge}>
+              <Tv2 size={9} color="#60a5fa" />
+              <Text style={styles.starredGridEpisodeText}>
+                S{entry.lastEpisode.seasonNumber}·E{entry.lastEpisode.episodeNumber}
+              </Text>
+            </View>
+          )}
+
+          {/* Unstar button */}
+          <Pressable onPress={onUnstar} style={styles.gridDeleteBtn} hitSlop={8}>
+            <StarIcon size={12} color="#facc15" fill="#facc15" />
+          </Pressable>
+        </View>
+
+        <Text style={styles.gridTitle} numberOfLines={2}>
+          {entry.title}
+        </Text>
+        {entry.releaseDate && (
+          <Text style={styles.gridYear}>{entry.releaseDate.split('-')[0]}</Text>
+        )}
+      </Animated.View>
+    );
+  }
+
+  // ── List variant (default) ──────────────────────────────────────────────────
   return (
     <Animated.View
       entering={FadeInDown.duration(350)}
@@ -630,7 +709,7 @@ function EpisodePrompt({
             </Text>
 
             <Text style={styles.episodeHint}>
-              We'll save this so you know where to continue on any device.
+              We&apos;ll save this so you know where to continue on any device.
             </Text>
 
             {/* Season + Episode inputs */}
@@ -704,7 +783,7 @@ function EmptyState({ isFiltered }: { isFiltered: boolean }) {
       <Text style={styles.emptySubtext}>
         {isFiltered
           ? "Try a different filter."
-          : "Scan a video file from the Scanner tab to add titles here."}
+          : "Use the Scanner button to add titles here."}
       </Text>
     </Animated.View>
   );
@@ -726,6 +805,8 @@ export function LibraryView({
   onSettingsPress,
 }: LibraryViewProps) {
   const navigation = useNavigation<NavigationProp>();
+  const insets = useSafeAreaInsets();
+  const { account } = useAccount();
   const [filter, setFilter] = useState<FilterTab>("all");
   const [sortIdx, setSortIdx] = useState(0);
   const [viewMode, setViewMode] = useState<ViewMode>("list");
@@ -744,10 +825,10 @@ export function LibraryView({
   const sortKey = SORT_OPTIONS[sortIdx].key;
   const sortLabel = SORT_OPTIONS[sortIdx].label;
 
-  // Fetch lastPlayedAt timestamps when items change or sort changes to lastPlayed
+  // Fetch lastPlayedAt timestamps when items change and subscribe to progress updates
   useEffect(() => {
-    if (sortKey !== 'lastPlayed') return;
-    
+    let mounted = true;
+
     const fetchLastPlayed = async () => {
       const map: Record<string, string | null> = {};
       await Promise.all(
@@ -757,11 +838,21 @@ export function LibraryView({
           map[item.id] = lastPlayed;
         })
       );
-      setLastPlayedMap(map);
+      if (mounted) setLastPlayedMap(map);
     };
 
     void fetchLastPlayed();
-  }, [items, sortKey]);
+
+    // Refresh when any progress changes (markAsPlayed / save / clear)
+    setOnProgressChanged(() => {
+      void fetchLastPlayed();
+    });
+
+    return () => {
+      mounted = false;
+      setOnProgressChanged(null);
+    };
+  }, [items]);
 
   const handleDetails = (item: MediaItem) => {
     console.log(`LibraryView: Navigating to Details for: ${item.title} (ID: ${item.id})`);
@@ -811,6 +902,13 @@ export function LibraryView({
     | { kind: 'media'; item: MediaItem }
     | { kind: 'cloud'; entry: CloudStarredEntry };
 
+  // Map item id -> index in the incoming items array (assumed to reflect added order)
+  const addedIndex = useMemo(() => {
+    const m: Record<string, number> = {};
+    items.forEach((it, idx) => { m[it.id] = idx; });
+    return m;
+  }, [items]);
+
   const visible = useMemo((): ListRow[] => {
     let list = items;
 
@@ -825,6 +923,7 @@ export function LibraryView({
       if (sortKey === "rating") return b.rating - a.rating;
       if (sortKey === "year")
         return (b.releaseDate ?? "").localeCompare(a.releaseDate ?? "");
+
       if (sortKey === "lastPlayed") {
         const aPlayed = lastPlayedMap[a.id];
         const bPlayed = lastPlayedMap[b.id];
@@ -833,7 +932,22 @@ export function LibraryView({
         if (!bPlayed) return -1;
         return bPlayed.localeCompare(aPlayed);
       }
-      return 0;
+
+      // Default (added / recently added):
+      // 1) Items with a recent lastPlayedAt should float to the top (most recent first)
+      // 2) Otherwise fall back to incoming items order (assumed added order) with newest first
+      const aPlayed = lastPlayedMap[a.id];
+      const bPlayed = lastPlayedMap[b.id];
+      if (aPlayed || bPlayed) {
+        if (!aPlayed) return 1;
+        if (!bPlayed) return -1;
+        const cmp = bPlayed.localeCompare(aPlayed);
+        if (cmp !== 0) return cmp;
+      }
+
+      const aIdx = addedIndex[a.id] ?? 0;
+      const bIdx = addedIndex[b.id] ?? 0;
+      return bIdx - aIdx;
     });
 
     const mediaRows: ListRow[] = sorted.map((item) => ({ kind: 'media', item }));
@@ -851,7 +965,7 @@ export function LibraryView({
     }
 
     return mediaRows;
-  }, [items, cloudStarredItems, filter, sortKey, lastPlayedMap]);
+  }, [items, cloudStarredItems, filter, sortKey, lastPlayedMap, addedIndex]);
 
   const movies = items.filter((i) => i.type === "movie").length;
   const tvShows = items.filter((i) => i.type === "tv").length;
@@ -990,12 +1104,12 @@ export function LibraryView({
           { paddingTop: headerOffset + 8, paddingHorizontal: 24 },
         ]}
         renderItem={({ item: row }) => {
-          // In the starred tab, ALL items (local or cloud-only) use StarredCard
           if (row.kind === 'cloud') {
             return (
               <StarredCard
                 entry={row.entry}
                 onUnstar={() => onUnstarCloud?.(row.entry.mediaId)}
+                viewMode={viewMode}
               />
             );
           }
@@ -1022,6 +1136,7 @@ export function LibraryView({
               <StarredCard
                 entry={entry}
                 onUnstar={() => onToggleStar?.(item.id)}
+                viewMode={viewMode}
               />
             );
           }
@@ -1183,7 +1298,7 @@ const styles = StyleSheet.create({
   },
 
   // ── Grid ──────────────────────────────────────────────────────────────────────
-  gridContent: { paddingBottom: 90 },
+  gridContent: { paddingBottom: 140 },
   gridRow: { gap: 12, marginBottom: 12 },
 
   gridCard: { width: GRID_ITEM_WIDTH },
@@ -1316,7 +1431,7 @@ const styles = StyleSheet.create({
   gridRating: { fontSize: 11, fontWeight: "600", color: "#a1a1aa" },
 
   // ── List ──────────────────────────────────────────────────────────────────────
-  listContent: { gap: 12, paddingBottom: 90 },
+  listContent: { gap: 12, paddingBottom: 140 },
 
   listCard: {
     flexDirection: "row",
@@ -1846,4 +1961,33 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     flexShrink: 0,
   },
+
+  // Wraps StarredCard in grid mode so it spans both columns at full width
+  starredGridWrap: {
+    width: SCREEN_WIDTH - 48, // full content width (matches paddingHorizontal: 24 on each side)
+    marginBottom: 12,
+  },
+
+  // ── Starred grid card overlays ────────────────────────────────────────────────
+  starredGridEpisodeBadge: {
+    position: "absolute",
+    bottom: 8,
+    left: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 9999,
+    backgroundColor: "rgba(0,0,0,0.65)",
+    borderWidth: 1,
+    borderColor: "rgba(96,165,250,0.35)",
+  },
+  starredGridEpisodeText: {
+    fontSize: 9,
+    fontWeight: "800",
+    color: "#60a5fa",
+    letterSpacing: 0.2,
+  },
+
 });
