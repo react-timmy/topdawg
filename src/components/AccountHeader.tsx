@@ -19,17 +19,32 @@ import {
 import { CloudUpload } from 'lucide-react-native';
 import { FilmSortAccount } from '../services/authService';
 
+const SYNC_FRESH_MS = 30 * 60 * 1000; // 30 minutes
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface AccountHeaderProps {
   account: FilmSortAccount | null;
   isSyncing: boolean;
   syncPending: boolean;
+  /** ISO timestamp of the last successful sync, or null if never synced. */
+  lastSyncedAt: string | null;
   signingIn: boolean;
   signInError: string | null;
   onSignIn: () => void;
+  onSignOut?: () => void;
+  signOutPending?: boolean;
+  onRedeemPro?: () => void;
+  displayNameOverride?: string;
+  avatarFallback?: {
+    emoji: string;
+    color: string;
+  };
+  preferAvatarFallback?: boolean;
   /** When true, omit outer spacing — parent card provides padding. */
   embedded?: boolean;
+  /** When true, hides Sign Out / Redeem Pro action buttons (e.g. on Profile screen where Settings has them). */
+  hideActions?: boolean;
 }
 
 // ─── Sync status badge ────────────────────────────────────────────────────────
@@ -37,9 +52,11 @@ export interface AccountHeaderProps {
 function SyncBadge({
   isSyncing,
   syncPending,
+  lastSyncedAt,
 }: {
   isSyncing: boolean;
   syncPending: boolean;
+  lastSyncedAt: string | null;
 }) {
   if (isSyncing) {
     return (
@@ -49,14 +66,22 @@ function SyncBadge({
       </View>
     );
   }
-  if (syncPending) {
+
+  // Yellow: sync has failed, never happened, or is overdue (>30 min ago)
+  const isStale = !lastSyncedAt
+    || (Date.now() - new Date(lastSyncedAt).getTime()) > SYNC_FRESH_MS;
+
+  if (syncPending || isStale) {
+    const label = syncPending ? 'Sync pending' : 'Not synced';
     return (
       <View style={styles.syncBadge}>
         <View style={[styles.syncDot, { backgroundColor: '#f59e0b' }]} />
-        <Text style={[styles.syncBadgeText, { color: '#f59e0b' }]}>Sync pending</Text>
+        <Text style={[styles.syncBadgeText, { color: '#f59e0b' }]}>{label}</Text>
       </View>
     );
   }
+
+  // Green: synced within the last 30 minutes
   return (
     <View style={styles.syncBadge}>
       <View style={[styles.syncDot, { backgroundColor: '#4ade80' }]} />
@@ -65,10 +90,29 @@ function SyncBadge({
   );
 }
 
-// ─── Avatar (photo or initials fallback) ──────────────────────────────────────
+// ─── Avatar (photo, custom fallback, or initials) ─────────────────────────────
 
-function Avatar({ account }: { account: FilmSortAccount }) {
+function Avatar({
+  account,
+  avatarFallback,
+  preferAvatarFallback = false,
+}: {
+  account: FilmSortAccount;
+  avatarFallback?: {
+    emoji: string;
+    color: string;
+  };
+  preferAvatarFallback?: boolean;
+}) {
   const initial = (account.displayName?.[0] ?? account.email?.[0] ?? '?').toUpperCase();
+
+  if (preferAvatarFallback && avatarFallback) {
+    return (
+      <View style={[styles.avatar, styles.avatarFallback, { backgroundColor: avatarFallback.color }]}>
+        <Text style={styles.avatarEmoji}>{avatarFallback.emoji}</Text>
+      </View>
+    );
+  }
 
   if (account.photoUrl) {
     return (
@@ -76,6 +120,14 @@ function Avatar({ account }: { account: FilmSortAccount }) {
         source={{ uri: account.photoUrl }}
         style={styles.avatar}
       />
+    );
+  }
+
+  if (avatarFallback) {
+    return (
+      <View style={[styles.avatar, styles.avatarFallback, { backgroundColor: avatarFallback.color }]}>
+        <Text style={styles.avatarEmoji}>{avatarFallback.emoji}</Text>
+      </View>
     );
   }
 
@@ -92,25 +144,73 @@ export function AccountHeader({
   account,
   isSyncing,
   syncPending,
+  lastSyncedAt,
   signingIn,
   signInError,
   onSignIn,
+  onSignOut,
+  signOutPending = false,
+  onRedeemPro,
+  displayNameOverride,
+  avatarFallback,
+  preferAvatarFallback = false,
   embedded = false,
+  hideActions = false,
 }: AccountHeaderProps) {
   // ── Signed-in ──────────────────────────────────────────────────────────────
   if (account) {
     return (
-      <View style={[styles.signedInRow, embedded && styles.embedded]}>
-        <Avatar account={account} />
-        <View style={styles.accountInfo}>
-          <Text style={styles.displayName} numberOfLines={1}>
-            {account.displayName}
-          </Text>
-          <Text style={styles.email} numberOfLines={1}>
-            {account.email}
-          </Text>
+      <View style={[styles.signedInWrap, embedded && styles.embedded]}>
+        <View style={styles.signedInRow}>
+          <Avatar
+            account={account}
+            avatarFallback={avatarFallback}
+            preferAvatarFallback={preferAvatarFallback}
+          />
+          <View style={styles.accountInfo}>
+            <Text style={styles.displayName} numberOfLines={1}>
+              {displayNameOverride ?? account.displayName}
+            </Text>
+            <Text style={styles.email} numberOfLines={1}>
+              {account.email}
+            </Text>
+          </View>
+          <SyncBadge
+            isSyncing={isSyncing}
+            syncPending={syncPending}
+            lastSyncedAt={lastSyncedAt}
+          />
         </View>
-        <SyncBadge isSyncing={isSyncing} syncPending={syncPending} />
+
+        {!hideActions && (
+          <View style={styles.actionRail}>
+            <Pressable
+              style={({ pressed }) => [
+                styles.railBtn,
+                styles.railBtnGhost,
+                (!onSignOut && styles.railBtnDisabled),
+                (pressed && onSignOut && !signOutPending) && styles.railBtnPressed,
+              ]}
+              onPress={onSignOut}
+              disabled={!onSignOut || signOutPending}
+            >
+              <Text style={styles.railBtnText}>{signOutPending ? 'Signing out…' : 'Sign Out'}</Text>
+            </Pressable>
+
+            <Pressable
+              style={({ pressed }) => [
+                styles.railBtn,
+                styles.railBtnAccent,
+                (!onRedeemPro && styles.railBtnDisabled),
+                pressed && onRedeemPro && styles.railBtnPressed,
+              ]}
+              onPress={onRedeemPro}
+              disabled={!onRedeemPro}
+            >
+              <Text style={[styles.railBtnText, styles.railBtnAccentText]}>Redeem Pro</Text>
+            </Pressable>
+          </View>
+        )}
       </View>
     );
   }
@@ -166,6 +266,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 12,
   },
+  signedInWrap: {
+    gap: 12,
+  },
   avatar: {
     width: 40,
     height: 40,
@@ -182,6 +285,9 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '800',
   },
+  avatarEmoji: {
+    fontSize: 16,
+  },
   accountInfo: {
     flex: 1,
     gap: 1,
@@ -194,6 +300,43 @@ const styles = StyleSheet.create({
   email: {
     color: '#71717a',
     fontSize: 11,
+  },
+
+  actionRail: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  railBtn: {
+    flex: 1,
+    height: 36,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    paddingHorizontal: 10,
+  },
+  railBtnGhost: {
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  railBtnAccent: {
+    backgroundColor: '#ffffff',
+    borderColor: '#ffffff',
+  },
+  railBtnText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  railBtnAccentText: {
+    color: '#000000',
+  },
+  railBtnPressed: {
+    opacity: 0.82,
+  },
+  railBtnDisabled: {
+    opacity: 0.5,
   },
 
   // ── Sync badge ─────────────────────────────────────────────────────────────

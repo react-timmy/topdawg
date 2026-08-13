@@ -158,13 +158,14 @@ RULES:
 5. season/episode: S##E## or S##EP## → both. "- ##" anime (no S) → season=1, episode=##. EP## alone → season=1.
 6. year: 4-digit 1888-2030, prefer parens, skip if part of title.
 7. confidence: 1.0=perfect, 0.9=clear, 0.7-0.8=good, 0.5-0.6=weak, 0.2-0.4=bare.
-8. isAnime=true ONLY from filename signals (anime sites/groups, Eng Dub + episode, [1080p] fansub style). isAnime=false for Western tags (Netflix, NF, AMZN, YTS, RARBG, …). NEVER set isAnime from title recognition alone.
+8. isAnime=true if the filename contains anime signals (anime sites/groups, Eng Dub, fansubs) OR if the title is a widely known anime (e.g. Solo Leveling, Naruto). isAnime=false for Western tags.
 9. Never put year/season/episode/quality/codec in the title. Numbered sequels are movies (Rocky IV). Resolutions are not episodes (1080p ≠ 1080).
 
 Known sources (strip these from titles):
 ${sourcesForPrompt()}
 
 EXAMPLES:
+SoloLeveling_Season2_EP7 → {"title":"Solo Leveling","type":"tv","season":2,"episode":7,"year":null,"confidence":0.9,"isAnime":true}
 AnimePahe_Dandadan_Eng_Dub_-_07_BD_360p_CRUCiBLE.mp4 → {"title":"Dandadan","type":"tv","season":1,"episode":7,"year":null,"confidence":0.9,"isAnime":true}
 [SubsPlease] Frieren - 18 (1080p).mkv → {"title":"Frieren","type":"tv","season":1,"episode":18,"year":null,"confidence":0.95,"isAnime":true}
 The.Matrix.1999.1080p.BluRay.x264-[YTS.MX].mkv → {"title":"The Matrix","type":"movie","season":null,"episode":null,"year":1999,"confidence":1.0,"isAnime":false}

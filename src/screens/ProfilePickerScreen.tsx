@@ -38,6 +38,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Pencil, Clapperboard } from 'lucide-react-native';
+import { proxyFetchPublic } from '../services/proxyClient';
 
 import { useAccount } from '../context/AccountContext';
 import {
@@ -53,20 +54,29 @@ const NF_RED = '#E50914';
 
 // ─── Avatar bubble ────────────────────────────────────────────────────────────
 
+/**
+ * Shows the Google profile photo only when the user hasn't chosen a custom
+ * emoji avatar (i.e. still on the default 🎬). Once they pick any preset
+ * from the grid, their emoji takes precedence everywhere.
+ */
 function AvatarBubble({
   emoji,
   color,
   photoUrl,
   size = 88,
   fontSize = 38,
+  isDefaultEmoji = false,
 }: {
   emoji: string;
   color: string;
   photoUrl?: string | null;
   size?: number;
   fontSize?: number;
+  /** True when the emoji is still the factory default — allows Google photo to show. */
+  isDefaultEmoji?: boolean;
 }) {
-  if (photoUrl) {
+  // Google photo wins only when no custom emoji has been chosen yet
+  if (photoUrl && isDefaultEmoji) {
     return (
       <Image
         source={{ uri: photoUrl }}
@@ -306,6 +316,7 @@ function SignedInView({
               emoji={profile.avatarEmoji}
               color={profile.avatarColor}
               photoUrl={photoUrl}
+              isDefaultEmoji={profile.avatarEmoji === DEFAULT_PROFILE.avatarEmoji}
               size={88}
               fontSize={38}
             />
@@ -342,6 +353,32 @@ export function ProfilePickerScreen({ navigation }: { navigation: any }) {
   const [editVisible, setEditVisible] = useState(false);
   const [profileLoaded, setProfileLoaded] = useState(false);
 
+  // Background poster pulled from TMDB (proxy must expose /tmdb/public)
+  const [bgPosterUrl, setBgPosterUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadBackground = async () => {
+      try {
+        const data = await proxyFetchPublic<{ results?: Array<{ poster_path?: string }> }>('tmdb', {
+          path: '/trending/movie/week',
+          params: { language: 'en-US' },
+        });
+        const results = data.results ?? [];
+        const posters = results
+          .filter((r) => r.poster_path)
+          .map((r) => `https://image.tmdb.org/t/p/w780${r.poster_path}`);
+        if (posters.length && !cancelled) {
+          setBgPosterUrl(posters[Math.floor(Math.random() * posters.length)]);
+        }
+      } catch (e) {
+        // silently ignore — background is decorative and should not block sign-in
+      }
+    };
+    loadBackground();
+    return () => { cancelled = true; };
+  }, []);
+
   // Load stored profile on mount
   useEffect(() => {
     profileService.get().then((p) => {
@@ -366,9 +403,21 @@ export function ProfilePickerScreen({ navigation }: { navigation: any }) {
         // Will re-read via useEffect below after account state updates
       }
     } catch (err: unknown) {
-      setSignInError(
-        String((err as any)?.message ?? 'Sign-in failed. Please try again.'),
-      );
+      const e = err as any;
+      const rawMsg = String(e?.message ?? 'Sign-in failed. Please try again.');
+
+      // Friendly mapping for common, actionable cases
+      let friendly = rawMsg;
+      const code = String(e?.code ?? '').toLowerCase();
+      const lower = rawMsg.toLowerCase();
+
+      if (code.includes('network') || lower.includes('network request failed') || lower.includes('network')) {
+        friendly = 'No internet connection. Check your network and try again.';
+      } else if (lower.includes('play services')) {
+        friendly = 'Google Play Services is not available or out of date on this device.';
+      }
+
+      setSignInError(friendly);
     } finally {
       setSigningIn(false);
     }
@@ -409,6 +458,10 @@ export function ProfilePickerScreen({ navigation }: { navigation: any }) {
 
   return (
     <View style={[styles.root, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
+      {bgPosterUrl ? (
+        <Image source={{ uri: bgPosterUrl }} style={styles.bgImage} blurRadius={6} />
+      ) : null}
+
       <StatusBar hidden />
 
       {account ? (
@@ -489,6 +542,7 @@ const styles = StyleSheet.create({
     width: '100%',
     alignItems: 'center',
     gap: 14,
+    marginTop: 140, // increased to push the sign-in action further down
   },
   googleBtn: {
     width: '100%',
@@ -593,6 +647,18 @@ const styles = StyleSheet.create({
   avatarBubble: {
     alignItems: 'center',
     justifyContent: 'center',
+  },
+
+  // Decorative background pulled from TMDB via the public proxy route
+  bgImage: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    width: '100%',
+    height: '100%',
+    opacity: 0.08,
   },
 
   // ── Edit sheet ─────────────────────────────────────────────────────────────

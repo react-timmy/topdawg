@@ -52,7 +52,7 @@ import {
   QrCode,
 } from 'lucide-react-native';
 
-import { RootStackParamList, WatchPartyMember, WatchPartyMessage } from '../types';
+import { RootStackParamList, WatchPartyMember, WatchPartyMessage, MediaItem } from '../types';
 import { useWatchParty } from '../context/WatchPartyContext';
 import { useAccount } from '../context/AccountContext';
 import { MEMBER_TIMEOUT_MS, watchPartyService } from '../services/watchPartyService';
@@ -219,6 +219,10 @@ export function WatchPartyScreen() {
   const [showQRModal, setShowQRModal] = useState(false);
   const chatListRef = useRef<FlatList<WatchPartyMessage>>(null);
 
+  // Track the message count when the user last viewed the Chat tab
+  const lastSeenChatCountRef = useRef(0);
+  const [unreadChatCount, setUnreadChatCount] = useState(0);
+
   // ── Join on mount if not already in room ─────────────────────────────────
   useEffect(() => {
     if (!party.isInParty && !party.isLoading && account) {
@@ -231,6 +235,19 @@ export function WatchPartyScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── Track unread chat messages ────────────────────────────────────────────
+  useEffect(() => {
+    if (tab === 'chat') {
+      // User is on the chat tab — mark everything as seen
+      lastSeenChatCountRef.current = party.messages.length;
+      setUnreadChatCount(0);
+    } else {
+      // User is on another tab — count new messages since they last viewed chat
+      const newCount = party.messages.length - lastSeenChatCountRef.current;
+      setUnreadChatCount(newCount > 0 ? newCount : 0);
+    }
+  }, [party.messages.length, tab]);
+
   // ── Auto-scroll chat ──────────────────────────────────────────────────────
   useEffect(() => {
     if (tab === 'chat' && party.messages.length > 0) {
@@ -239,14 +256,28 @@ export function WatchPartyScreen() {
   }, [party.messages, tab]);
 
   // ── Handle party ended by host ────────────────────────────────────────────
+  // Track whether we were previously in the party so we can detect the transition.
+  // Also snapshot isHost while still in the party — by the time room tears down,
+  // isHost becomes false for everyone (room is null), so we can't rely on it then.
+  const wasInPartyRef = useRef(false);
+  const wasHostRef = useRef(false);
   useEffect(() => {
-    if (party.isInParty || party.isLoading) return;
-    // Room was torn down (host ended it)
-    if (!party.isHost) {
+    if (party.isInParty) {
+      wasInPartyRef.current = true;
+      wasHostRef.current = party.isHost;
+      return;
+    }
+    if (party.isLoading) return;
+    // Room was torn down — only show the alert if we were previously in it
+    if (!wasInPartyRef.current) return;
+    wasInPartyRef.current = false;
+
+    if (!wasHostRef.current) {
       Alert.alert(
         'Watch Party Has Ended',
-        'The host has ended this watch party.',
-        [{ text: 'OK', onPress: () => navigation.canGoBack() && navigation.goBack() }]
+        'The host has ended this watch party. You will be taken back now.',
+        [{ text: 'OK', onPress: () => navigation.canGoBack() && navigation.goBack() }],
+        { cancelable: false },
       );
     } else if (navigation.canGoBack()) {
       navigation.goBack();
@@ -431,9 +462,18 @@ export function WatchPartyScreen() {
             style={[styles.tab, tab === t && styles.tabActive]}
             onPress={() => setTab(t)}
           >
-            <Text style={[styles.tabText, tab === t && styles.tabTextActive]}>
-              {t === 'members' ? `Members (${party.members.length})` : 'Chat'}
-            </Text>
+            <View style={styles.tabInner}>
+              <Text style={[styles.tabText, tab === t && styles.tabTextActive]}>
+                {t === 'members' ? `Members (${party.members.length})` : 'Chat'}
+              </Text>
+              {t === 'chat' && unreadChatCount > 0 && tab !== 'chat' && (
+                <View style={styles.chatBadge}>
+                  <Text style={styles.chatBadgeText}>
+                    {unreadChatCount > 99 ? '99+' : unreadChatCount}
+                  </Text>
+                </View>
+              )}
+            </View>
           </Pressable>
         ))}
       </View>
@@ -556,8 +596,19 @@ const styles = StyleSheet.create({
   tabs: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: BORDER },
   tab: { flex: 1, paddingVertical: 12, alignItems: 'center' },
   tabActive: { borderBottomWidth: 2, borderBottomColor: NF_RED },
+  tabInner: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   tabText: { color: TEXT_SECONDARY, fontSize: 14 },
   tabTextActive: { color: TEXT_PRIMARY, fontWeight: '600' },
+  chatBadge: {
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: NF_RED,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  chatBadgeText: { color: '#ffffff', fontSize: 11, fontWeight: '800', lineHeight: 13 },
 
   listWrap: { flex: 1 },
   emptyText: { color: TEXT_SECONDARY, fontSize: 14, textAlign: 'center', marginTop: 24 },

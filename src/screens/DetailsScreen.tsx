@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState, useMemo } from 'react';
 import {
   View,
   Text,
@@ -32,6 +32,8 @@ import {
   RefreshCw,
   Youtube,
   Users,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react-native';
 import Animated, {
   FadeIn,
@@ -52,11 +54,11 @@ import { animeService } from '../services/animeService';
 import { geminiAIService } from '../services/geminiAIService';
 import { watchProgressService } from '../storage/watchProgressService';
 import { watchHistoryService } from '../storage/watchHistoryService';
-import { useBadgeUnlock } from '../context/BadgeUnlockContext';
 import { usePro } from '../context/ProContext';
 import { fileLabel } from '../services/fileOrganizeService';
 import { useWatchParty } from '../context/WatchPartyContext';
 import { useAccount } from '../context/AccountContext';
+import { truncateDescription } from '../utils/descriptionUtils';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const BACKDROP_HEIGHT = SCREEN_HEIGHT * 0.42;
@@ -220,7 +222,6 @@ export function DetailsScreen() {
   const [episodesLoading, setEpisodesLoading] = useState(false);
   const [selectedSeason, setSelectedSeason] = useState(1);
   const [trailerUrl, setTrailerUrl] = useState<string | null>(null);
-  const { checkForNewBadges } = useBadgeUnlock();
   const { isPro } = usePro();
   const party = useWatchParty();
   const { account } = useAccount();
@@ -241,6 +242,25 @@ export function DetailsScreen() {
   const [similarItems, setSimilarItems] = useState<MediaItem[]>([]);
   const [tvTab, setTvTab] = useState<'episodes' | 'similar'>('episodes');
   const [isWatched, setIsWatched] = useState(false);
+  const [expandedDescription, setExpandedDescription] = useState(false);
+
+  // Identify the latest season for TV shows based on local files
+  const latestSeasonNumber = useMemo(() => {
+    if (item.type !== 'tv' || !item.localFiles || item.localFiles.length === 0) return null;
+    return Math.max(...item.localFiles.map((f) => f.seasonNumber || 1));
+  }, [item]);
+
+  // Compute display poster and backdrop (overriding with season-specific ones if available)
+  const { displayPosterUrl, displayBackdropUrl } = useMemo(() => {
+    let p = item.posterUrl;
+    let b = item.backdropUrl;
+    if (item.type === 'tv' && latestSeasonNumber != null && item.seasons) {
+      const seasonData = item.seasons.find((s) => s.seasonNumber === latestSeasonNumber);
+      if (seasonData?.posterUrl) p = seasonData.posterUrl;
+      if (seasonData?.backdropUrl) b = seasonData.backdropUrl;
+    }
+    return { displayPosterUrl: p, displayBackdropUrl: b };
+  }, [item, latestSeasonNumber]);
 
   const cleanFilenameForSearch = (filename: string) => {
     return filename
@@ -609,7 +629,7 @@ export function DetailsScreen() {
     setIsWatched(true);
     // Check for newly earned badges after manual mark
     const history = await watchHistoryService.getHistory();
-    void checkForNewBadges(history);
+    
   };
 
   const handlePlayMovie = () => {
@@ -747,9 +767,9 @@ export function DetailsScreen() {
         {/* ── Hero backdrop ──────────────────────────────────────────────────── */}
         <View style={styles.backdropContainer}>
           <Animated.View style={[StyleSheet.absoluteFillObject, backdropParallax]}>
-            {item.backdropUrl ? (
+            {displayBackdropUrl ? (
               <Image
-                source={{ uri: item.backdropUrl }}
+                source={{ uri: displayBackdropUrl }}
                 style={StyleSheet.absoluteFillObject}
                 resizeMode="cover"
               />
@@ -773,9 +793,9 @@ export function DetailsScreen() {
             entering={FadeIn.delay(150).duration(500)}
             style={styles.posterWrap}
           >
-            {item.posterUrl ? (
+            {displayPosterUrl ? (
               <Image
-                source={{ uri: item.posterUrl }}
+                source={{ uri: displayPosterUrl }}
                 style={styles.poster}
                 resizeMode="cover"
               />
@@ -880,7 +900,31 @@ export function DetailsScreen() {
 
           {/* Overview — moved below genre pills */}
           <Animated.View entering={FadeInDown.delay(150).duration(400)}>
-            <Text style={styles.overview}>{item.description}</Text>
+            {(() => {
+              const { truncated, isTruncated } = truncateDescription(item.description);
+              const displayText = expandedDescription ? item.description : truncated;
+              
+              return (
+                <View>
+                  <Text style={styles.overview}>{displayText}</Text>
+                  {isTruncated && (
+                    <Pressable 
+                      onPress={() => setExpandedDescription(!expandedDescription)}
+                      style={styles.expandButton}
+                    >
+                      <Text style={styles.expandButtonText}>
+                        {expandedDescription ? 'Show less' : 'Show more'}
+                      </Text>
+                      {expandedDescription ? (
+                        <ChevronUp size={14} color="#3b82f6" />
+                      ) : (
+                        <ChevronDown size={14} color="#3b82f6" />
+                      )}
+                    </Pressable>
+                  )}
+                </View>
+              );
+            })()}
           </Animated.View>
 
           {/* Action buttons */}
@@ -1564,6 +1608,18 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#d4d4d8',
     lineHeight: 22,
+  },
+  expandButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: 10,
+  },
+  expandButtonText: {
+    fontSize: 12,
+    color: '#3b82f6',
+    fontWeight: '600',
   },
 
   // TV section

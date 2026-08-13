@@ -3,7 +3,7 @@
  * Redesigned with: streak chip, settings shortcut, badge glow on earned,
  * earned/total badge count, week comparison, inline Pro CTA, MemoriesCard.
  */
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -18,7 +18,7 @@ import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   Play, Film, Tv, Zap, Star, Sparkles, Heart, Eye, Moon,
-  Trophy, Clock, Clapperboard, Lock, User, Gift, Settings,
+  Trophy, Clock, Clapperboard, Lock, User, Settings,
   Flame, TrendingUp, TrendingDown, Minus, Crown,
 } from 'lucide-react-native';
 
@@ -26,9 +26,8 @@ import { MediaItem } from '../types';
 import { watchHistoryService, WatchEvent } from '../storage/watchHistoryService';
 import { storageService } from '../storage/asyncStorage';
 import { computeStats, WatchStats } from '../utils/statsEngine';
-import { evaluateBadges, BadgeResult } from '../utils/badgeEngine';
-import { useBadgeUnlock } from '../context/BadgeUnlockContext';
 import { usePro } from '../context/ProContext';
+import { profileService, setOnProfileSaved } from '../storage/profileService';
 import { FREE_SCAN_LIMIT } from '../storage/proStatusService';
 import { MemoriesCard } from '../components/MemoriesCard';
 import { useAccount } from '../context/AccountContext';
@@ -37,21 +36,6 @@ import { FilmSortAccount } from '../services/authService';
 
 const CARD_PADDING = 16;
 
-// ─── Icon resolver ────────────────────────────────────────────────────────────
-
-const ICON_MAP: Record<string, React.ComponentType<{ size: number; color: string; strokeWidth?: number }>> = {
-  Play, Film, Tv, Zap, Star, Sparkles, Heart, Eye, Moon, Trophy, Clock, Clapperboard,
-};
-
-function BadgeIcon({ name, size, color }: { name: string; size: number; color: string }) {
-  const Icon = ICON_MAP[name] ?? Star;
-  const nudge = name === 'Play' ? { marginLeft: 3 } : undefined;
-  return (
-    <View style={nudge}>
-      <Icon size={size} color={color} strokeWidth={2} />
-    </View>
-  );
-}
 
 // ─── Date formatter ───────────────────────────────────────────────────────────
 
@@ -68,39 +52,6 @@ function formatWatchedAt(iso: string): string {
   if (sameDay(date, yesterday)) return 'Yesterday';
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   return `${months[date.getMonth()]} ${date.getDate()}`;
-}
-
-// ─── PendingBadgesSection ─────────────────────────────────────────────────────
-
-function PendingBadgesSection() {
-  const { savedBadges, openSaved } = useBadgeUnlock();
-  if (savedBadges.length === 0) return null;
-  return (
-    <Animated.View entering={FadeInDown.delay(0).duration(340)} style={[styles.card, styles.pendingCard]}>
-      <View style={styles.sectionTitleRow}>
-        <Gift size={16} color="#f59e0b" strokeWidth={2} />
-        <Text style={[styles.sectionTitleInRow, { color: '#f59e0b' }]}>Unclaimed Badges</Text>
-        <View style={styles.pendingBadge}>
-          <Text style={styles.pendingBadgeText}>{savedBadges.length}</Text>
-        </View>
-      </View>
-      <Text style={styles.pendingHint}>You closed these before opening them. Tap to claim!</Text>
-      <View style={styles.pendingRow}>
-        {savedBadges.map((badge) => (
-          <Pressable
-            key={badge.id}
-            style={({ pressed }) => [styles.pendingItem, pressed && { opacity: 0.7 }]}
-            onPress={() => openSaved(badge.id)}
-          >
-            <View style={[styles.pendingIconWrap, { borderColor: badge.color, shadowColor: badge.color }]}>
-              <BadgeIcon name={badge.icon} size={22} color={badge.color} />
-            </View>
-            <Text style={styles.pendingItemName} numberOfLines={1}>{badge.name}</Text>
-          </Pressable>
-        ))}
-      </View>
-    </Animated.View>
-  );
 }
 
 // ─── InlineProCTA ──────────────────────────────────────────────────────────────
@@ -142,6 +93,8 @@ type HeroAccountProps = {
   signingIn: boolean;
   signInError: string | null;
   onSignIn: () => void;
+  displayNameOverride?: string;
+  hideActions?: boolean;
 };
 
 function HeroStats({ stats, accountProps }: { stats: WatchStats; accountProps: HeroAccountProps }) {
@@ -153,17 +106,6 @@ function HeroStats({ stats, accountProps }: { stats: WatchStats; accountProps: H
   const weekColor = weekDiff > 0 ? '#34d399' : weekDiff < 0 ? '#f87171' : '#52525b';
   return (
     <Animated.View entering={FadeInDown.delay(40).duration(340)} style={styles.heroCard}>
-      {/* Identity strip (Google account / save progress) */}
-      <AccountHeader
-        account={accountProps.account}
-        isSyncing={accountProps.isSyncing}
-        syncPending={accountProps.syncPending}
-        signingIn={accountProps.signingIn}
-        signInError={accountProps.signInError}
-        onSignIn={accountProps.onSignIn}
-        embedded
-      />
-
       <View style={styles.heroDividerLine} />
 
       {/* Streak pill */}
@@ -209,157 +151,67 @@ function HeroStats({ stats, accountProps }: { stats: WatchStats; accountProps: H
 
 // ─── GenreChart ───────────────────────────────────────────────────────────────
 
+const GENRE_COLORS: Record<string, string> = {
+  Drama: '#f97316',
+  Comedy: '#f59e0b',
+  Action: '#ef4444',
+  Adventure: '#60a5fa',
+  Romance: '#ec4899',
+  Horror: '#7c3aed',
+  Thriller: '#ef4444',
+  Animation: '#14b8a6',
+  Documentary: '#a78bfa',
+  Family: '#fbbf24',
+  'Music': '#e11d48',
+  'Sci-Fi': '#06b6d4',
+  'Fantasy': '#8b5cf6',
+  Crime: '#374151',
+  Mystery: '#0ea5a4',
+  Western: '#c084fc',
+};
+
+function getGenreColor(name: string) {
+  // Normalize genre string to match keys loosely
+  const key = Object.keys(GENRE_COLORS).find((k) =>
+    name.toLowerCase().includes(k.toLowerCase()),
+  );
+  return key ? GENRE_COLORS[key] : '#ffffff';
+}
+
 function GenreChart({ genres }: { genres: { genre: string; count: number }[] }) {
-  if (genres.length === 0) return null;
-  const maxCount = genres[0].count;
+  if (!genres || genres.length === 0) return null;
+  const maxCount = genres[0].count || 1;
   const display = genres.slice(0, 5);
   return (
     <Animated.View entering={FadeInDown.delay(80).duration(340)} style={styles.card}>
       <Text style={styles.sectionTitle}>Top Genres</Text>
-      {display.map((g, i) => (
-        <View key={g.genre} style={styles.genreRow}>
-          <Text style={styles.genreRank}>{i + 1}</Text>
-          <View style={styles.genreBarWrap}>
-            <Text style={styles.genreName}>{g.genre}</Text>
-            <View style={styles.barTrack}>
-              <View style={[styles.barFill, { width: `${Math.round((g.count / maxCount) * 100)}%` }]} />
+      {display.map((g, i) => {
+        const pct = Math.round((g.count / maxCount) * 100);
+        const color = getGenreColor(g.genre);
+        return (
+          <View key={g.genre} style={styles.genreRow}>
+            <Text style={styles.genreRank}>{i + 1}</Text>
+            <View style={styles.genreBarWrap}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                <Text style={styles.genreName}>{g.genre}</Text>
+                <Text style={styles.genreCount}>{g.count}</Text>
+              </View>
+              <View style={styles.barTrack}>
+                <View
+                  style={[
+                    styles.barFill,
+                    { width: `${Math.min(100, pct)}%`, backgroundColor: color },
+                  ]}
+                />
+              </View>
             </View>
           </View>
-          <Text style={styles.genreCount}>{g.count}</Text>
-        </View>
-      ))}
+        );
+      })}
     </Animated.View>
   );
 }
 
-// ─── AnimeBlock ───────────────────────────────────────────────────────────────
-
-function AnimeBlock({ stats }: { stats: WatchStats }) {
-  if (stats.animeEpisodes === 0) return null;
-  const hoursLabel = stats.animeHours < 1
-    ? `${Math.round(stats.animeHours * 60)}m`
-    : `${stats.animeHours}h`;
-  const topAnimeGenres = stats.animeGenres.slice(0, 3).map((g) => g.genre).join(' · ');
-  return (
-    <Animated.View entering={FadeInDown.delay(100).duration(340)} style={[styles.card, styles.animeCard]}>
-      <View style={styles.animeTitleRow}>
-        <Star size={16} color="#e879f9" strokeWidth={2} fill="#e879f9" />
-        <Text style={[styles.sectionTitle, styles.animeTitle]}>Anime</Text>
-      </View>
-      <View style={styles.heroRow}>
-        <View style={styles.heroStatCell}>
-          <Text style={styles.heroStatValue}>{stats.animeEpisodes}</Text>
-          <Text style={styles.heroStatLabel}>Episodes</Text>
-        </View>
-        <View style={styles.heroDivider} />
-        <View style={styles.heroStatCell}>
-          <Text style={styles.heroStatValue}>{hoursLabel}</Text>
-          <Text style={styles.heroStatLabel}>Watched</Text>
-        </View>
-      </View>
-      {topAnimeGenres ? <Text style={styles.animeGenres}>{topAnimeGenres}</Text> : null}
-    </Animated.View>
-  );
-}
-
-// ─── StreakCard ────────────────────────────────────────────────────────────────
-
-function StreakCard({ stats }: { stats: WatchStats }) {
-  if (stats.currentStreak === 0 && stats.longestStreak === 0) return null;
-  return (
-    <Animated.View entering={FadeInDown.delay(120).duration(340)} style={[styles.card, styles.streakCard]}>
-      <View style={styles.sectionTitleRow}>
-        <Flame size={16} color="#f59e0b" strokeWidth={2} fill="#f59e0b" />
-        <Text style={[styles.sectionTitleInRow, { color: '#f59e0b' }]}>Watch Streak</Text>
-      </View>
-      <View style={styles.heroRow}>
-        <View style={styles.heroStatCell}>
-          <Text style={[styles.heroStatValue, { color: '#f59e0b' }]}>{stats.currentStreak}</Text>
-          <Text style={styles.heroStatLabel}>Current</Text>
-        </View>
-        <View style={styles.heroDivider} />
-        <View style={styles.heroStatCell}>
-          <Text style={styles.heroStatValue}>{stats.longestStreak}</Text>
-          <Text style={styles.heroStatLabel}>Best streak</Text>
-        </View>
-        <View style={styles.heroDivider} />
-        <View style={styles.heroStatCell}>
-          <Text style={styles.heroStatValue}>{stats.uniqueTitles}</Text>
-          <Text style={styles.heroStatLabel}>Unique titles</Text>
-        </View>
-      </View>
-    </Animated.View>
-  );
-}
-
-// ─── BadgeCard ────────────────────────────────────────────────────────────────
-
-function BadgeCard({ badge }: { badge: BadgeResult }) {
-  return (
-    <View style={[
-      styles.badgeCard,
-      !badge.earned && styles.badgeCardLocked,
-      // Earned: colored border glow
-      badge.earned && { borderColor: badge.color + '55', shadowColor: badge.color },
-    ]}>
-      <View style={[
-        styles.badgeIconWrap,
-        badge.earned && { backgroundColor: badge.color + '22', borderColor: badge.color + '55', borderWidth: 1 },
-      ]}>
-        <BadgeIcon
-          name={badge.icon}
-          size={22}
-          color={badge.earned ? badge.color : 'rgba(255,255,255,0.2)'}
-        />
-        {!badge.earned && (
-          <View style={styles.lockOverlay}>
-            <Lock size={10} color="rgba(255,255,255,0.35)" strokeWidth={2.5} />
-          </View>
-        )}
-      </View>
-      <Text style={[styles.badgeName, !badge.earned && styles.badgeNameLocked]} numberOfLines={2}>
-        {badge.name}
-      </Text>
-      {badge.earned ? (
-        <Text style={styles.badgeDesc} numberOfLines={2}>{badge.description}</Text>
-      ) : (
-        <Text style={styles.badgeProgress}>{badge.current} / {badge.target}</Text>
-      )}
-      {!badge.earned && (
-        <View style={styles.badgeBarTrack}>
-          <View style={[styles.badgeBarFill, { width: `${Math.round(badge.progress * 100)}%` }]} />
-        </View>
-      )}
-    </View>
-  );
-}
-
-// ─── BadgeSection ─────────────────────────────────────────────────────────────
-
-function BadgeSection({ badges }: { badges: BadgeResult[] }) {
-  const earned = badges.filter((b) => b.earned).length;
-  const rows: BadgeResult[][] = [];
-  for (let i = 0; i < badges.length; i += 3) rows.push(badges.slice(i, i + 3));
-  return (
-    <Animated.View entering={FadeInDown.delay(160).duration(340)} style={styles.card}>
-      <View style={styles.sectionTitleRow}>
-        <Trophy size={16} color="#fbbf24" strokeWidth={2} />
-        <Text style={styles.sectionTitleInRow}>Badges</Text>
-        <View style={styles.badgeCountPill}>
-          <Text style={styles.badgeCountText}>{earned} / {badges.length}</Text>
-        </View>
-      </View>
-      {rows.map((row, ri) => (
-        <View key={ri} style={styles.badgeRow}>
-          {row.map((badge) => <BadgeCard key={badge.id} badge={badge} />)}
-          {row.length < 3 && Array.from({ length: 3 - row.length }).map((_, i) => (
-            <View key={`empty-${i}`} style={styles.badgeCardPlaceholder} />
-          ))}
-        </View>
-      ))}
-    </Animated.View>
-  );
-}
 
 // ─── RecentlyWatchedRow ───────────────────────────────────────────────────────
 
@@ -412,7 +264,7 @@ function RecentlyWatchedList({
   history: WatchEvent[];
   onPressItem: (event: WatchEvent) => void;
 }) {
-  const recent = history.slice(0, 20);
+  const recent = history.slice(0, 5);
   return (
     <Animated.View entering={FadeInDown.delay(200).duration(340)} style={styles.card}>
       <Text style={styles.sectionTitle}>Recently Watched</Text>
@@ -441,8 +293,39 @@ export function ProfileScreen() {
   const [history, setHistory] = useState<WatchEvent[]>([]);
   const [library, setLibrary] = useState<MediaItem[]>([]);
   const [stats, setStats] = useState<WatchStats>(() => computeStats([]));
-  const [badges, setBadges] = useState<BadgeResult[]>(() => evaluateBadges([], computeStats([])));
   const [headerH, setHeaderH] = useState(0);
+
+  // Header image URI and first name (keeps updated from account or local profile)
+  const [headerImageUri, setHeaderImageUri] = useState<string | null>(account?.photoUrl ?? null);
+  const [headerFirstName, setHeaderFirstName] = useState<string>(() => {
+    const name = account?.displayName ?? '';
+    return name ? name.split(' ')[0] : 'Profile';
+  });
+
+  useEffect(() => {
+    // Update from account when it changes
+    setHeaderImageUri(account?.photoUrl ?? null);
+    const name = account?.displayName ?? '';
+    setHeaderFirstName(name ? name.split(' ')[0] : 'Profile');
+  }, [account]);
+
+  // Update when local profile is saved (ProfilePicker edits)
+  useEffect(() => {
+    const cb = (p: any) => {
+      if (p?.displayName) setHeaderFirstName(String(p.displayName).split(' ')[0] ?? p.displayName);
+    };
+    setOnProfileSaved(cb);
+    // Also seed from local profile when mounted
+    (async () => {
+      try {
+        const p = await profileService.get();
+        if (p?.displayName && !account?.displayName) {
+          setHeaderFirstName(p.displayName.split(' ')[0]);
+        }
+      } catch {}
+    })();
+    return () => setOnProfileSaved(null);
+  }, [account]);
 
   useFocusEffect(
     useCallback(() => {
@@ -454,11 +337,9 @@ export function ProfileScreen() {
       ]).then(([h, lib]) => {
         if (cancelled) return;
         const s = computeStats(h);
-        const b = evaluateBadges(h, s);
         setHistory(h);
         setLibrary(lib);
         setStats(s);
-        setBadges(b);
         setLoading(false);
       });
       return () => { cancelled = true; };
@@ -491,16 +372,23 @@ export function ProfileScreen() {
       >
         <View style={styles.headerRow}>
           <View style={styles.headerIconRing}>
-            <User size={18} color="#a1a1aa" strokeWidth={2} />
+            {headerImageUri ? (
+              <Image source={{ uri: headerImageUri }} style={styles.headerSmallAvatar} />
+            ) : (
+              <User size={18} color="#a1a1aa" strokeWidth={2} />
+            )}
             {/* Small padlock badge — signals Memories is a Pro feature */}
             <View style={styles.headerIconLockBadge}>
-              <Lock size={8} color="#a78bfa" strokeWidth={3} />
+            {/* Sync status dot: green = synced, yellow = syncing/pending */}
+            <View style={[styles.headerSyncDot, { backgroundColor: (isSyncing || syncPending) ? '#f59e0b' : '#4ade80' }]} />
             </View>
           </View>
+
           <View>
-            <Text style={styles.headerTitle}>Profile</Text>
+            <Text style={styles.headerTitle}>{headerFirstName}</Text>
             <Text style={styles.headerSubtitle}>Your watch stats & history</Text>
           </View>
+
           <Pressable
             onPress={() => navigation.navigate('Settings')}
             hitSlop={12}
@@ -509,6 +397,7 @@ export function ProfileScreen() {
             <Settings size={20} color="#71717a" strokeWidth={2} />
           </Pressable>
         </View>
+
         <View style={styles.headerBorder} />
       </View>
 
@@ -540,14 +429,12 @@ export function ProfileScreen() {
                 setSigningIn(false);
               }
             },
+            // Profile screen: override display name to first name and hide action buttons
+            displayNameOverride: headerFirstName,
+            hideActions: true,
           }}
         />
-        <PendingBadgesSection />
-        {!isPro && <InlineProCTA scansUsed={scansUsed} scansRemaining={scansRemaining} />}
-        <StreakCard stats={stats} />
         <GenreChart genres={stats.genreBreakdown} />
-        <AnimeBlock stats={stats} />
-        <BadgeSection badges={badges} />
         <MemoriesCard history={history} library={library} animDelay={220} />
         <RecentlyWatchedList history={history} onPressItem={handlePressHistoryItem} />
       </ScrollView>
@@ -581,17 +468,23 @@ const styles = StyleSheet.create({
   },
   headerIconLockBadge: {
     position: 'absolute',
-    bottom: -1,
-    right: -1,
-    width: 15,
-    height: 15,
+    // tiny outward offset so the dot sits just outside the avatar
+    bottom: -3,
+    right: -3,
+    width: 16,
+    height: 16,
     borderRadius: 8,
-    backgroundColor: '#18181b',
-    borderWidth: 1,
-    borderColor: 'rgba(167,139,250,0.40)',
     alignItems: 'center',
     justifyContent: 'center',
   },
+  headerSyncDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 7,
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.25)'
+  },
+
   headerTitle: { fontSize: 28, fontWeight: '800', letterSpacing: -0.4, color: '#ffffff' },
   headerSubtitle: { fontSize: 12, color: '#52525b', marginTop: 1 },
   settingsBtn: {
@@ -599,6 +492,10 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   headerBorder: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 1, backgroundColor: CARD_BORDER },
+
+  headerSmallAvatar: {
+    width: 38, height: 38, borderRadius: 19, overflow: 'hidden',
+  },
 
   // ── Scroll ──
   scroll: { paddingHorizontal: CARD_PADDING, gap: 12 },

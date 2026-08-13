@@ -28,6 +28,14 @@ export const PROXY_BASE_URL: string = (
   '' // empty until you deploy — set in .env
 ).replace(/\/$/, '');
 
+// Debug: surface whether proxy URL was bundled into the app at runtime (redacted)
+try {
+  // eslint-disable-next-line no-console
+  console.log('[env][debug] PROXY_BASE_URL present?', PROXY_BASE_URL ? '[REDACTED SET]' : '[NOT SET]');
+} catch (e) {
+  /* ignore */
+}
+
 // ── Google Sign-In / Firebase ──────────────────────────────────────────────────
 /** Web Client ID from Firebase Console → Authentication → Sign-in method → Google */
 export const GOOGLE_WEB_CLIENT_ID: string =

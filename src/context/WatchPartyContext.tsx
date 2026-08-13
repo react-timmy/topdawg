@@ -72,7 +72,13 @@ export interface WatchPartyContextValue {
   error: string | null;
 
   /** Host: create a new party for the given item. */
-  createParty: (item: MediaItem, activeFileUri?: string | null) => Promise<string>;
+  createParty: (
+    item: MediaItem,
+    activeFileUri?: string | null,
+    roomName?: string,
+    privacy?: 'public' | 'friends-only',
+    invitedFriends?: string[]
+  ) => Promise<string>;
   /** Guest: join an existing party by room ID. */
   joinParty: (roomId: string, item: MediaItem) => Promise<void>;
   /** Leave (or end if host) the current party. */
@@ -133,6 +139,11 @@ export function WatchPartyProvider({ children }: { children: React.ReactNode }) 
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Tracks whether the registered player has actually loaded content and is
+  // ready to receive seek/play commands. Stored in state so the guest sync
+  // effect re-runs the moment the player becomes ready.
+  const [playerReady, setPlayerReady] = useState(false);
+
   // Refs that don't need to trigger re-renders
   const playerRef = useRef<PlayerBridge | null>(null);
   const playbackRef = useRef({ positionSeconds: 0, durationSeconds: 0, isPlaying: false, isBuffering: false });
@@ -165,6 +176,7 @@ export function WatchPartyProvider({ children }: { children: React.ReactNode }) 
     setRoom(null);
     setMembers([]);
     setMessages([]);
+    setPlayerReady(false);
   }, [stopTimers, stopListeners]);
 
   // ── Start listeners ────────────────────────────────────────────────────────
@@ -172,7 +184,7 @@ export function WatchPartyProvider({ children }: { children: React.ReactNode }) 
   const startListeners = useCallback((roomId: string) => {
     stopListeners();
 
-    unsubRoomRef.current = watchPartyService.onRoom(roomId, (r) => {
+    unsubRoomRef.current = watchPartyService.onRoom(roomId, (r: WatchPartyRoom | null) => {
       if (!r || r.status === 'ended') {
         teardown();
         return;
@@ -211,22 +223,29 @@ export function WatchPartyProvider({ children }: { children: React.ReactNode }) 
     }, HEARTBEAT_INTERVAL_MS);
   }, []);
 
-  // ── Guest sync: apply host playback when room doc updates ─────────────────
+  // ── Guest sync: apply host playback when room doc updates or player becomes ready ──
 
   useEffect(() => {
+    // Only run for guests with an active room and a registered player.
     if (!room || isHost || !playerRef.current) return;
+
+    // Don't touch the player until it signals it has loaded content.
+    // playerReady is set to true by notifyPlayback() once the ticker reports
+    // a non-zero duration, which is the reliable signal that the native player
+    // is prepared to receive seek and play commands.
+    if (!playerReady) return;
 
     const pb: WatchPartyPlaybackState = room.playback;
     const player = playerRef.current;
 
     // Compensate for network latency: estimate how far the host has advanced
-    // since they wrote the state.
+    // since they pushed this state to Firestore.
     const latencyS = (Date.now() - new Date(pb.updatedAt).getTime()) / 1000;
     const targetPos = pb.isPlaying
       ? pb.positionSeconds + latencyS
       : pb.positionSeconds;
 
-    // Seek if the host sent a new seek generation or drift is too large
+    // Seek if the host sent a new seek generation or drift is too large.
     const seekNeeded = pb.seekGeneration > lastSeekGenRef.current;
     const drift = Math.abs(player.getPosition() - targetPos);
 
@@ -235,10 +254,12 @@ export function WatchPartyProvider({ children }: { children: React.ReactNode }) 
       player.seek(targetPos);
     }
 
-    // Mirror play/pause state
+    // Mirror play/pause state.
     player.setPlaying(pb.isPlaying);
+  // playerReady is intentionally included: when it flips true the effect runs
+  // immediately with the latest room playback, syncing the guest on first load.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room?.playback]);
+  }, [room?.playback, playerReady]);
 
   // ── Pause on app background ────────────────────────────────────────────────
 
@@ -267,6 +288,9 @@ export function WatchPartyProvider({ children }: { children: React.ReactNode }) 
   const createParty = useCallback(async (
     item: MediaItem,
     activeFileUri?: string | null,
+    roomName?: string,
+    privacy?: 'public' | 'friends-only',
+    invitedFriends?: string[]
   ): Promise<string> => {
     if (!account) throw new Error('You must be signed in to host a watch party.');
     setIsLoading(true);
@@ -278,6 +302,9 @@ export function WatchPartyProvider({ children }: { children: React.ReactNode }) 
         hostPhotoUrl: account.photoUrl ?? undefined,
         item,
         activeFileUri,
+        roomName,
+        privacy,
+        invitedFriends,
       });
       setRoom(newRoom);
       startListeners(newRoom.roomId);
@@ -352,6 +379,12 @@ export function WatchPartyProvider({ children }: { children: React.ReactNode }) 
     isBuffering: boolean,
   ) => {
     playbackRef.current = { positionSeconds, durationSeconds, isPlaying, isBuffering };
+    // Signal that the player has loaded content and is ready for sync commands.
+    // We use a functional update to avoid re-rendering on every 250 ms tick;
+    // the state only changes on the false → true transition.
+    if (durationSeconds > 0) {
+      setPlayerReady((prev) => prev ? prev : true);
+    }
   }, []);
 
   const getRoom = useCallback(async (roomId: string): Promise<WatchPartyRoom | null> => {

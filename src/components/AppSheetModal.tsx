@@ -17,6 +17,17 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { X } from 'lucide-react-native';
 
+function hexToRgba(hex: string, alpha: number): string {
+  const normalized = hex.replace('#', '');
+  const value = normalized.length === 8 ? normalized.slice(0, 6) : normalized;
+  if (value.length !== 6) return `rgba(167,139,250,${alpha})`;
+  const r = parseInt(value.slice(0, 2), 16);
+  const g = parseInt(value.slice(2, 4), 16);
+  const b = parseInt(value.slice(4, 6), 16);
+  if ([r, g, b].some((n) => Number.isNaN(n))) return `rgba(167,139,250,${alpha})`;
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
 export type AppSheetAction = {
   label: string;
   onPress: () => void;
@@ -24,6 +35,8 @@ export type AppSheetAction = {
   variant?: 'primary' | 'secondary' | 'destructive' | 'ghost';
   loading?: boolean;
   disabled?: boolean;
+  /** Optional per-action accent color (hex) used for ghost/outline buttons */
+  accentColor?: string;
 };
 
 export type AppSheetModalProps = {
@@ -78,8 +91,8 @@ export function AppSheetModal({
               style={[
                 styles.iconRing,
                 {
-                  backgroundColor: `${iconColor}1f`,
-                  borderColor: `${iconColor}44`,
+                  backgroundColor: hexToRgba(iconColor, 0.12),
+                  borderColor: hexToRgba(iconColor, 0.28),
                 },
               ]}
             >
@@ -114,6 +127,8 @@ export function AppSheetModal({
                     variant === 'ghost' && styles.btnGhost,
                     (a.disabled || a.loading) && styles.btnDisabled,
                     pressed && !a.disabled && !a.loading && styles.btnPressed,
+                    // If this is a ghost button with a custom accentColor, apply it
+                    variant === 'ghost' && a.accentColor ? { borderColor: hexToRgba(a.accentColor, 1) } : null,
                   ]}
                   onPress={a.onPress}
                   disabled={a.disabled || a.loading}
@@ -139,6 +154,8 @@ export function AppSheetModal({
                         variant === 'secondary' && styles.btnTextSecondary,
                         variant === 'destructive' && styles.btnTextDestructive,
                         variant === 'ghost' && styles.btnTextGhost,
+                        // If ghost + accentColor, color the text accordingly
+                        variant === 'ghost' && a.accentColor ? { color: a.accentColor } : null,
                       ]}
                     >
                       {a.label}

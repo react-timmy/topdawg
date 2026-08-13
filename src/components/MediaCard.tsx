@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import { View, Image, Text, Pressable, StyleSheet } from "react-native";
 import Animated, { FadeIn, FadeInDown, Layout } from "react-native-reanimated";
 import { LinearGradient } from "expo-linear-gradient";
@@ -12,6 +12,7 @@ interface MediaCardProps {
   item: MediaItem;
   latestEpisode?: LocalFile;
   index?: number;
+  onPress?: (item: MediaItem) => void;
 }
 
 type NavigationProp = any; // Simplifying to any to handle cross-navigator types easily
@@ -20,7 +21,7 @@ function filesOf(item: MediaItem): LocalFile[] {
   return item.localFiles ?? (item.localFile ? [item.localFile] : []);
 }
 
-export const MediaCard: React.FC<MediaCardProps> = ({ item, index = 0 }) => {
+export const MediaCard: React.FC<MediaCardProps> = ({ item, index = 0, onPress }) => {
   const navigation = useNavigation<NavigationProp>();
   const [resume, setResume] = useState<{
     position: number;
@@ -46,7 +47,13 @@ export const MediaCard: React.FC<MediaCardProps> = ({ item, index = 0 }) => {
   );
 
   const handleDetails = () => {
-    navigation.navigate("Details", { item });
+    if (onPress) {
+      // If custom onPress is provided, use it
+      onPress(item);
+    } else {
+      // Default behavior: navigate to Details
+      navigation.navigate("Details", { item });
+    }
   };
 
   const handlePlay = () => {
@@ -68,6 +75,12 @@ export const MediaCard: React.FC<MediaCardProps> = ({ item, index = 0 }) => {
       playItem.title = `${item.title} - S${String(playFile.seasonNumber).padStart(2, "0")}E${String(playFile.episodeNumber).padStart(2, "0")}`;
     }
 
+    // Mark this file as played (records lastPlayedAt) so the library can move it to the top.
+    // Fire-and-forget: navigation should happen immediately even if persistence is still pending.
+    void watchProgressService
+      .markAsPlayed(item.id, { uri: playFile.uri, filename: playFile.filename })
+      .catch(() => {});
+
     navigation.navigate("VideoPlayer", {
       item: playItem,
       startPosition: resume?.position,
@@ -77,6 +90,24 @@ export const MediaCard: React.FC<MediaCardProps> = ({ item, index = 0 }) => {
   const hasLocal = !!(resume?.file?.uri || item.localFile?.uri);
   const isContinue = !!resume;
 
+  // Mirror the same season-image logic as DetailsScreen: use the latest
+  // season's poster/backdrop when available.
+  const latestSeasonNumber = useMemo(() => {
+    if (item.type !== 'tv' || !item.localFiles || item.localFiles.length === 0) return null;
+    return Math.max(...item.localFiles.map((f) => f.seasonNumber || 1));
+  }, [item.type, item.localFiles]);
+
+  const { displayPosterUrl, displayBackdropUrl } = useMemo(() => {
+    let p = item.posterUrl;
+    let b = item.backdropUrl;
+    if (item.type === 'tv' && latestSeasonNumber != null && item.seasons) {
+      const seasonData = item.seasons.find((s) => s.seasonNumber === latestSeasonNumber);
+      if (seasonData?.posterUrl) p = seasonData.posterUrl;
+      if (seasonData?.backdropUrl) b = seasonData.backdropUrl;
+    }
+    return { displayPosterUrl: p, displayBackdropUrl: b };
+  }, [item, latestSeasonNumber]);
+
   return (
     <Animated.View
       entering={FadeInDown.delay(index * 80).duration(500).springify()}
@@ -85,9 +116,9 @@ export const MediaCard: React.FC<MediaCardProps> = ({ item, index = 0 }) => {
     >
       <Pressable onPress={handleDetails} style={StyleSheet.absoluteFillObject} />
       {/* ── Backdrop ─────────────────────────────────────────────── */}
-      {item.backdropUrl ? (
+      {displayBackdropUrl ? (
         <Image
-          source={{ uri: item.backdropUrl }}
+          source={{ uri: displayBackdropUrl }}
           style={styles.backgroundImage}
           resizeMode="cover"
         />
@@ -113,7 +144,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({ item, index = 0 }) => {
         style={styles.posterOverlay}
       >
         <Image
-          source={item.posterUrl ? { uri: item.posterUrl } : undefined}
+          source={displayPosterUrl ? { uri: displayPosterUrl } : undefined}
           style={styles.poster}
           resizeMode="cover"
         />

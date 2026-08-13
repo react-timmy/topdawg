@@ -244,7 +244,7 @@ export function CastProvider({ children }: { children: React.ReactNode }) {
   const endSession = useCallback(async () => {
     if (!castSession) return;
     setCastState((prev) => ({ ...prev, sessionState: 'disconnecting' }));
-    await castSession.endSession(true);
+    await (castSession as any).endSession(true);
     setCastState(DEFAULT_CAST_STATE);
   }, [castSession]);
 

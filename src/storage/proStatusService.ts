@@ -17,15 +17,53 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { authService } from '../services/authService';
+import { syncService } from '../services/syncService';
+import { profileService } from './profileService';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const KEY_PRO   = '@filmsort:pro_unlocked';
-const KEY_MONTH = '@filmsort:scan_month';
-const KEY_FILES = '@filmsort:scan_files_used';
+const KEY_PRO         = '@filmsort:pro_unlocked';
+const KEY_MONTH       = '@filmsort:scan_month';
+const KEY_FILES       = '@filmsort:scan_files_used';
+const KEY_REDEEMED    = '@filmsort:redeemed_code';
+const KEY_ACCOUNT_PRO_PREFIX = '@filmsort:account_pro:'; // + uid => code
 
 /** Free-tier monthly AI file limit. Raise or lower here only. */
 export const FREE_SCAN_LIMIT = 30;
+
+// ─── Redemption codes ─────────────────────────────────────────────────────────
+// 25 unique one-time codes. Each code grants lifetime Pro on the device that
+// redeems it. Once a code is stored in KEY_REDEEMED it is locked to that device
+// and cannot be reused.  Only share these with users you choose.
+
+const PRO_CODES: ReadonlySet<string> = new Set([
+  'FILM-X9K2-PROA',
+  'SORT-W7M4-PROB',
+  'LENS-B3N8-PROC',
+  'REEL-H6P1-PROD',
+  'CINE-Q5T7-PROE',
+  'SHOT-V2R9-PROF',
+  'FADE-J4L3-PROG',
+  'WRAP-U8C6-PROH',
+  'CAST-Y1D5-PROI',
+  'CLIP-Z0F2-PROJ',
+  'TAKE-E7G4-PROK',
+  'GRIP-S3A8-PROL',
+  'ZOOM-M9K1-PROM',
+  'IRIS-T6W3-PRON',
+  'RACK-N2B7-PROO',
+  'PULL-P4H0-PROP',
+  'DOLLY-R8X5-PROQ',
+  'SLATE-C1V9-PROR',
+  'CRANE-L5Q2-PROS',
+  'TILT-A7U6-PROT',
+  'PANN-D3J4-PROU',
+  'MARK-F9Y1-PROV',
+  'BOOM-K2W8-PROW',
+  'GAFF-H0S5-PROX',
+  'DUPE-B6N3-PROY',
+]);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -42,7 +80,38 @@ function currentMonth(): string {
 export async function isProUser(): Promise<boolean> {
   try {
     const val = await AsyncStorage.getItem(KEY_PRO);
-    return val === 'true';
+    if (val === 'true') return true;
+
+    // If no local Pro flag, only consider account-linked pro markers when a
+    // Firebase user is currently signed in. This prevents a lingering local
+    // profile with pro markers from keeping the device Pro after sign-out.
+    let user = null;
+    try {
+      user = await authService.getCurrentFirebaseUser();
+    } catch {
+      user = null;
+    }
+
+    if (!user) return false;
+
+    // Check local account→code mapping (set at redeem time)
+    try {
+      const mapped = await AsyncStorage.getItem(KEY_ACCOUNT_PRO_PREFIX + user.uid);
+      if (mapped) return true;
+    } catch {
+      // ignore
+    }
+
+    // Last-resort: check the synced cloud profile cached locally
+    try {
+      const profile = await profileService.get();
+      const p = profile as unknown as Record<string, unknown>;
+      if (p.proCode || p.proGrantedAt) return true;
+    } catch {
+      // ignore profile read errors
+    }
+
+    return false;
   } catch {
     return false;
   }
@@ -143,6 +212,101 @@ export async function resetProStatus(): Promise<void> {
   }
 }
 
+/**
+ * Remove the Pro flag only (used when the signed-in user signs out so the device
+ * returns to the free plan). Does not clear redeemed-code lock or monthly counters.
+ */
+export async function clearProFlag(): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(KEY_PRO);
+    console.log('[ProStatus] Pro flag cleared (sign-out).');
+  } catch (err) {
+    console.warn('[ProStatus] clearProFlag failed:', err);
+  }
+}
+
+/**
+ * Attempt to redeem a Pro unlock code entered by the user.
+ *
+ * Returns:
+ *  { success: true }                        — code valid, Pro granted
+ *  { success: false, reason: 'invalid' }    — code not in the list
+ *  { success: false, reason: 'used' }       — a code is already redeemed on this device
+ *  { success: false, reason: 'already_pro'} — device already has Pro active
+ */
+export async function redeemProCode(
+  rawCode: string,
+): Promise<
+  | { success: true }
+  | { success: false; reason: 'invalid' | 'used' | 'already_pro' }
+> {
+  try {
+    const alreadyPro = await isProUser();
+    if (alreadyPro) return { success: false, reason: 'already_pro' };
+
+    // Normalize: uppercase, strip leading/trailing whitespace
+    const code = rawCode.trim().toUpperCase();
+
+    if (!PRO_CODES.has(code)) return { success: false, reason: 'invalid' };
+
+    // Check if this device already used a code
+    const usedCode = await AsyncStorage.getItem(KEY_REDEEMED);
+    if (usedCode) return { success: false, reason: 'used' };
+
+    // All good — activate Pro and record which code was used
+    await AsyncStorage.multiSet([
+      [KEY_PRO, 'true'],
+      [KEY_REDEEMED, code],
+    ]);
+
+    // If a Firebase user is currently signed in, attach the redeemed code to
+    // their cloud profile and store an account→code mapping locally so the
+    // account is recognized as Pro on other devices even if cloud sync fails.
+    try {
+      const user = await authService.getCurrentFirebaseUser();
+      if (user) {
+        try {
+          // Local account mapping (fire-and-forget)
+          await AsyncStorage.setItem(KEY_ACCOUNT_PRO_PREFIX + user.uid, code);
+        } catch (e) {
+          console.warn('[ProStatus] failed to write account→pro mapping locally:', e);
+        }
+
+        try {
+          const localProfile = await profileService.get();
+          const proProfile = {
+            ...(localProfile as unknown as Record<string, unknown>),
+            proCode: code,
+            proGrantedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+          // Fire-and-forget; syncService will noop if cloud sync disabled.
+          void syncService.pushProfile(user.uid, proProfile as any);
+        } catch (e) {
+          console.warn('[ProStatus] failed to attach pro code to cloud profile:', e);
+        }
+      }
+    } catch (e) {
+      // ignore any auth errors
+    }
+
+    console.log('[ProStatus] Pro granted via code:', code);
+    return { success: true };
+  } catch (err) {
+    console.warn('[ProStatus] redeemProCode failed:', err);
+    return { success: false, reason: 'invalid' };
+  }
+}
+
+export async function getAccountProCode(uid: string): Promise<string | null> {
+  try {
+    const val = await AsyncStorage.getItem(KEY_ACCOUNT_PRO_PREFIX + uid);
+    return val ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export const proStatusService = {
   isProUser,
   getScansUsedThisMonth,
@@ -152,5 +316,8 @@ export const proStatusService = {
   purchasePro,
   restorePro,
   resetProStatus,
+  clearProFlag,
+  redeemProCode,
+  getAccountProCode,
   FREE_SCAN_LIMIT,
 };

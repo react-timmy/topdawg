@@ -2,7 +2,7 @@ import React from "react";
 import { View, Text, StyleSheet, LayoutChangeEvent, Pressable } from "react-native";
 import { SharedValue } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { Bell, Search, Settings } from "lucide-react-native";
+import { Bell, Search, Settings, User, ScanLine } from "lucide-react-native";
 import { useNotifications } from "../context/NotificationContext";
 import { useNavigation } from "@react-navigation/native";
 
@@ -19,6 +19,11 @@ interface FloatingHeaderProps {
    * styled after the Netflix logo. Only pass this on Movies and TV screens.
    */
   showLogo?: boolean;
+  /**
+   * When true, renders the profile icon button in the header actions.
+   * Defaults to false — only pass on Library screen.
+   */
+  showProfile?: boolean;
 }
 
 // ─── FilmSortLogo ─────────────────────────────────────────────────────────────
@@ -28,7 +33,7 @@ interface FloatingHeaderProps {
  * positioned views to build the "F" shape: left vertical bar, top bar, mid bar,
  * with a brighter diagonal highlight slicing through all three.
  */
-function FilmSortLogo() {
+export function FilmSortLogo() {
   return (
     <View style={logoStyles.wrap}>
       {/* Main F shape — darker base layer */}
@@ -116,6 +121,7 @@ export function FloatingHeader({
   onSearchPress,
   onSettingsPress,
   showLogo = false,
+  showProfile = false,
 }: FloatingHeaderProps) {
   const insets = useSafeAreaInsets();
   const { unreadCount } = useNotifications();
@@ -155,6 +161,25 @@ export function FloatingHeader({
                 </View>
               )}
             </Pressable>
+            {showProfile && (
+              <Pressable
+                style={styles.iconBtn}
+                onPress={() => navigation.navigate("Profile")}
+                hitSlop={10}
+              >
+                <User size={19} color="#71717a" />
+              </Pressable>
+            )}
+
+            {/* Scanner action: white-background icon immediately after Notifications */}
+            <Pressable
+              style={[styles.iconBtn, styles.scanIconBtn]}
+              onPress={() => navigation.navigate('Scanner')}
+              hitSlop={10}
+            >
+              <ScanLine size={18} color="#000000" />
+            </Pressable>
+
             {onSettingsPress && (
               <Pressable style={styles.iconBtn} onPress={onSettingsPress} hitSlop={10}>
                 <Settings size={19} color="#52525b" />
@@ -194,15 +219,15 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
   },
   title: {
-    fontSize: 34,
+    fontSize: 26,
     fontWeight: "800",
-    letterSpacing: -0.5,
+    letterSpacing: -0.4,
     color: "#ffffff",
   },
   subtitle: {
-    fontSize: 12,
+    fontSize: 11,
     color: "#52525b",
-    marginTop: 2,
+    marginTop: 1,
   },
   actions: {
     flexDirection: "row",
@@ -217,6 +242,9 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.06)",
     alignItems: "center",
     justifyContent: "center",
+  },
+  scanIconBtn: {
+    backgroundColor: '#ffffff',
   },
   badge: {
     position: "absolute",
@@ -238,8 +266,10 @@ const styles = StyleSheet.create({
 
   // ── Title + logo row ───────────────────────────────────────────────────────
   titleGroup: {
+    flex: 1,
     flexDirection: "row",
     alignItems: "flex-end",
-    gap: 12,
+    gap: 10,
+    marginRight: 12,
   },
 });

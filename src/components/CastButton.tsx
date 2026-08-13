@@ -109,7 +109,7 @@ export function CastButton({
       try {
         // react-native-google-cast: obtain session manager and start session
         const { default: GoogleCast } = await import('react-native-google-cast');
-        await GoogleCast.getCastContext().then((ctx: any) => ctx?.startDiscovery?.());
+        await (GoogleCast as any).getCastContext?.().then((ctx: any) => ctx?.startDiscovery?.());
         const sessionManager = await GoogleCast.getSessionManager();
         await sessionManager.startSession(device.deviceId);
         // Cast current media at current position

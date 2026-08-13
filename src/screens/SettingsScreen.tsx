@@ -9,7 +9,7 @@
  *  4. Data — Clear library, metadata, watch history (PIN-gated)
  */
 
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -22,6 +22,9 @@ import {
   Linking,
   Image,
   Platform,
+  TextInput,
+  Modal,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -54,13 +57,14 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { storageService } from '../storage/asyncStorage';
 import { APP_NAME } from '../legal/legalContent';
 import { usePro } from '../context/ProContext';
-import { setPro, FREE_SCAN_LIMIT } from '../storage/proStatusService';
+import { FREE_SCAN_LIMIT } from '../storage/proStatusService';
 import { ProPaywallModal } from '../components/ProPaywallModal';
+import { ProCodeModal } from '../components/ProCodeModal';
 import { PinPadModal, PinPadMode } from '../components/PinPadModal';
 import {
   AppSheetModal,
-  AppSheetAction,
 } from '../components/AppSheetModal';
+import type { AppSheetAction } from '../components/AppSheetModal';
 import { pinService } from '../storage/pinService';
 import { profileService } from '../storage/profileService';
 import { watchHistoryService } from '../storage/watchHistoryService';
@@ -76,13 +80,12 @@ import {
 } from '../services/libraryExportService';
 
 // ─── App version — read from app.json via expo-constants so it never drifts ──
-const APP_VERSION: string =
-  Constants.expoConfig?.version ?? Constants.manifest?.version ?? '—';
+const APP_VERSION: string = Constants.expoConfig?.version ?? '—';
 const APP_BUILD: string =
   (Constants.expoConfig?.ios?.buildNumber as string | undefined) ??
   (Constants.expoConfig?.android?.versionCode?.toString()) ??
-  (Constants.manifest?.ios?.buildNumber as string | undefined) ??
   '—';
+const ICON_COLOR = '#3f3f3fff';
 
 // ─── Section header ───────────────────────────────────────────────────────────
 
@@ -112,14 +115,14 @@ function NavRow({
       style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
       onPress={onPress}
     >
-      <View style={[styles.rowIconWrap, { backgroundColor: `${tint}18` }]}>
+      <View style={styles.rowIconWrap}>
         {icon}
       </View>
       <View style={styles.rowBody}>
         <Text style={styles.rowLabel}>{label}</Text>
         {subtitle ? <Text style={styles.rowSubtitle}>{subtitle}</Text> : null}
       </View>
-      <ChevronRight size={16} color="#3f3f46" strokeWidth={2.2} />
+      <ChevronRight size={16} color={ICON_COLOR} strokeWidth={2.2} />
     </Pressable>
   );
 }
@@ -143,7 +146,7 @@ function DestructiveRow({
       onPress={onPress}
       disabled={loading}
     >
-      <View style={[styles.rowIconWrap, { backgroundColor: 'rgba(248,113,113,0.1)' }]}>
+      <View style={styles.rowIconWrap}>
         {icon}
       </View>
       <View style={styles.rowBody}>
@@ -151,8 +154,8 @@ function DestructiveRow({
         {subtitle ? <Text style={styles.rowSubtitle}>{subtitle}</Text> : null}
       </View>
       {loading
-        ? <ActivityIndicator size="small" color="#f87171" />
-        : <ChevronRight size={16} color="#3f3f46" strokeWidth={2.2} />}
+        ? <ActivityIndicator size="small" color={ICON_COLOR} />
+        : <ChevronRight size={16} color={ICON_COLOR} strokeWidth={2.2} />}
     </Pressable>
   );
 }
@@ -183,7 +186,7 @@ function AccountAvatar({ account, size = 32 }: { account: FilmSortAccount; size?
 
 // ─── Main screen ──────────────────────────────────────────────────────────────
 
-type PendingClear = 'library' | 'cache' | 'history' | 'account' | null;
+type PendingClear = 'library' | 'cache' | 'account' | null;
 
 type SheetConfig = {
   visible: boolean;
@@ -206,12 +209,11 @@ export function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const [clearingLibrary, setClearingLibrary] = useState(false);
   const [clearingCache, setClearingCache] = useState(false);
-  const [clearingHistory, setClearingHistory] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
   const { isPro, scansUsed, scansRemaining, refreshPro } = usePro();
   const { account, signIn, signOut, refreshAccount } = useAccount();
   const [showPaywall, setShowPaywall] = useState(false);
-  const [purchasing, setPurchasing] = useState(false);
+  const [proCodeOpen, setProCodeOpen] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [organizing, setOrganizing] = useState(false);
@@ -230,6 +232,12 @@ export function SettingsScreen() {
   const [pinModalVisible, setPinModalVisible] = useState(false);
   const [pinMode, setPinMode] = useState<PinPadMode>('set');
   const [pendingClear, setPendingClear] = useState<PendingClear>(null);
+
+  // ── Account name confirmation modal ──────────────────────────────────────
+  const [accountNameModalVisible, setAccountNameModalVisible] = useState(false);
+  const [accountNameInput, setAccountNameInput] = useState('');
+  const [accountNameError, setAccountNameError] = useState(false);
+  const accountNameInputRef = useRef<TextInput>(null);
 
   const refreshPinState = useCallback(async () => {
     setHasPin(await pinService.hasPin());
@@ -271,15 +279,15 @@ export function SettingsScreen() {
         openSheet({
           title: 'Library cleared',
           message: 'Your library has been cleared. Video files on your device were not deleted.',
-          icon: <CheckCircle2 size={28} color="#34d399" strokeWidth={2} />,
-          iconColor: '#34d399',
+          icon: <CheckCircle2 size={28} color={ICON_COLOR} strokeWidth={2} />,
+          iconColor: ICON_COLOR,
         });
       } catch {
         openSheet({
           title: 'Couldn’t clear library',
           message: 'Failed to clear library. Please try again.',
-          icon: <AlertTriangle size={28} color="#f87171" strokeWidth={2} />,
-          iconColor: '#f87171',
+          icon: <AlertTriangle size={28} color={ICON_COLOR} strokeWidth={2} />,
+          iconColor: ICON_COLOR,
         });
       } finally {
         setClearingLibrary(false);
@@ -297,44 +305,21 @@ export function SettingsScreen() {
         openSheet({
           title: 'Cache cleared',
           message: `Cleared ${cacheKeys.length} cached item(s). Posters and metadata will re-fetch as you browse.`,
-          icon: <CheckCircle2 size={28} color="#34d399" strokeWidth={2} />,
-          iconColor: '#34d399',
+          icon: <CheckCircle2 size={28} color={ICON_COLOR} strokeWidth={2} />,
+          iconColor: ICON_COLOR,
         });
       } catch {
         openSheet({
           title: 'Couldn’t clear cache',
           message: 'Failed to clear cache. Please try again.',
-          icon: <AlertTriangle size={28} color="#f87171" strokeWidth={2} />,
-          iconColor: '#f87171',
+          icon: <AlertTriangle size={28} color={ICON_COLOR} strokeWidth={2} />,
+          iconColor: ICON_COLOR,
         });
       } finally {
         setClearingCache(false);
       }
       return;
     }
-    if (kind === 'history') {
-      setClearingHistory(true);
-      try {
-        await watchHistoryService.clearHistory();
-        openSheet({
-          title: 'History cleared',
-          message: 'Watch history cleared and badges reset.',
-          icon: <CheckCircle2 size={28} color="#34d399" strokeWidth={2} />,
-          iconColor: '#34d399',
-        });
-      } catch {
-        openSheet({
-          title: 'Couldn’t clear history',
-          message: 'Failed to clear watch history. Please try again.',
-          icon: <AlertTriangle size={28} color="#f87171" strokeWidth={2} />,
-          iconColor: '#f87171',
-        });
-      } finally {
-        setClearingHistory(false);
-      }
-      return;
-    }
-
     if (kind === 'account') {
       setDeletingAccount(true);
       try {
@@ -376,15 +361,15 @@ export function SettingsScreen() {
           message: uid
             ? 'Your FilmSort account and local app data have been removed. Video files on your device were not deleted.'
             : 'All local FilmSort data has been wiped. Video files on your device were not deleted.',
-          icon: <CheckCircle2 size={28} color="#34d399" strokeWidth={2} />,
-          iconColor: '#34d399',
+          icon: <CheckCircle2 size={28} color={ICON_COLOR} strokeWidth={2} />,
+          iconColor: ICON_COLOR,
         });
       } catch {
         openSheet({
           title: 'Delete failed',
           message: 'Could not fully delete the account. Please try again.',
-          icon: <AlertTriangle size={28} color="#f87171" strokeWidth={2} />,
-          iconColor: '#f87171',
+          icon: <AlertTriangle size={28} color={ICON_COLOR} strokeWidth={2} />,
+          iconColor: ICON_COLOR,
         });
       } finally {
         setDeletingAccount(false);
@@ -422,8 +407,8 @@ export function SettingsScreen() {
           title: 'Clear library?',
           message:
             'This will remove all scanned titles from your library. Your video files will not be deleted. This cannot be undone.',
-          icon: <Trash2 size={28} color="#f87171" strokeWidth={2} />,
-          iconColor: '#f87171',
+          icon: <Trash2 size={28} color={ICON_COLOR} strokeWidth={2} />,
+          iconColor: ICON_COLOR,
           actions: [
             { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
             {
@@ -441,8 +426,8 @@ export function SettingsScreen() {
           title: 'Clear metadata cache?',
           message:
             'Cached poster art and metadata will be removed. They will be re-fetched the next time you view your library.',
-          icon: <Database size={28} color="#f87171" strokeWidth={2} />,
-          iconColor: '#f87171',
+          icon: <Database size={28} color={ICON_COLOR} strokeWidth={2} />,
+          iconColor: ICON_COLOR,
           actions: [
             { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
             {
@@ -455,39 +440,49 @@ export function SettingsScreen() {
             },
           ],
         });
-      } else if (kind === 'history') {
-        openSheet({
-          title: 'Clear watch history?',
-          message:
-            'This will permanently delete your watch history and reset all badges. This cannot be undone.',
-          icon: <Trash2 size={28} color="#f87171" strokeWidth={2} />,
-          iconColor: '#f87171',
-          actions: [
-            { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
-            {
-              label: 'Clear history',
-              variant: 'destructive',
-              onPress: () => {
-                closeSheet();
-                void executeClear('history');
-              },
-            },
-          ],
-        });
       } else if (kind === 'account') {
-        confirmDeleteAccount();
+        openAccountNameModal();
       }
     }
   };
 
-  const confirmDeleteAccount = () => {
+  // ── Account name confirmation modal ──────────────────────────────────────
+  const openAccountNameModal = () => {
+    setAccountNameInput('');
+    setAccountNameError(false);
+    setAccountNameModalVisible(true);
+    setTimeout(() => accountNameInputRef.current?.focus(), 300);
+  };
+
+  const closeAccountNameModal = () => {
+    setAccountNameModalVisible(false);
+    setAccountNameInput('');
+    setAccountNameError(false);
+  };
+
+  /** The display name to match — falls back to email prefix. */
+  const getExpectedAccountName = (): string => {
+    if (account?.displayName) return account.displayName;
+    if (account?.email) return account.email.split('@')[0];
+    return '';
+  };
+
+  const handleAccountNameConfirm = () => {
+    const expected = getExpectedAccountName();
+    const trimmed = accountNameInput.trim();
+    if (expected && trimmed.toLowerCase() !== expected.toLowerCase()) {
+      setAccountNameError(true);
+      return;
+    }
+    closeAccountNameModal();
+    // Show final "are you sure" sheet before executing
     openSheet({
       title: 'Delete account?',
       message: account
         ? 'This permanently removes your FilmSort account, cloud sync data, library, history, PIN, and local settings. Video files on your device are not deleted. This cannot be undone.'
         : 'This permanently wipes all local FilmSort data (library, history, profile, PIN, caches). Video files on your device are not deleted. This cannot be undone.',
-      icon: <UserX size={28} color="#f87171" strokeWidth={2} />,
-      iconColor: '#f87171',
+      icon: <UserX size={28} color={ICON_COLOR} strokeWidth={2} />,
+      iconColor: ICON_COLOR,
       actions: [
         { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
         {
@@ -503,7 +498,7 @@ export function SettingsScreen() {
   };
 
   const handleDeleteAccount = () => {
-    void requirePinThen('account', confirmDeleteAccount);
+    void requirePinThen('account', openAccountNameModal);
   };
 
   // ── Account: sign in ─────────────────────────────────────────────────────
@@ -523,36 +518,36 @@ export function SettingsScreen() {
 
   // ── Account: sign out ────────────────────────────────────────────────────
   const handleSettingsSignOut = () => {
-    Alert.alert(
-      'Sign Out',
-      'You will be signed out. Your local watch history will be kept. You can sign back in at any time.',
-      [
-        { text: 'Cancel', style: 'cancel' },
+    openSheet({
+      title: 'Sign out?',
+      message: 'You will be signed out. Your local watch history will be kept. You can sign back in at any time.',
+      icon: <LogOut size={28} color="#a78bfa" strokeWidth={2} />,
+      iconColor: '#a78bfa',
+      actions: [
+        { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
         {
-          text: 'Sign Out',
-          style: 'destructive',
-          onPress: async () => {
-            setSigningOut(true);
-            try { await signOut(); } finally { setSigningOut(false); }
+          label: 'Sign out',
+          variant: 'ghost',
+          accentColor: '#a78bfa',
+          onPress: () => {
+            closeSheet();
+            (async () => {
+              setSigningOut(true);
+              try {
+                await signOut();
+              } finally {
+                setSigningOut(false);
+              }
+            })();
           },
         },
       ],
-    );
+    });
   };
 
-  // ── Pro unlock (local entitlement — no Play / App Store IAP) ─────────────
-  const handlePurchase = async () => {
-    setPurchasing(true);
-    try {
-      await setPro();
-      await refreshPro();
-      Alert.alert('Pro Unlocked!', 'Enjoy unlimited AI scanning.');
-    } catch (err: unknown) {
-      const msg = String((err as any)?.message ?? '');
-      Alert.alert('Error', msg || 'Something went wrong. Please try again.');
-    } finally {
-      setPurchasing(false);
-    }
+  // ── Pro unlock is code-based only ────────────────────────────────────────
+  const handlePurchase = () => {
+    setProCodeOpen(true);
   };
 
   // ── Auto-Rename & Folder Magic (Pro) ─────────────────────────────────────
@@ -571,8 +566,8 @@ export function SettingsScreen() {
         openSheet({
           title: 'Nothing to organize',
           message: 'Scan some videos into your library first.',
-          icon: <FolderTree size={28} color="#60a5fa" strokeWidth={2} />,
-          iconColor: '#60a5fa',
+          icon: <FolderTree size={28} color={ICON_COLOR} strokeWidth={2} />,
+          iconColor: ICON_COLOR,
         });
         return;
       }
@@ -581,8 +576,8 @@ export function SettingsScreen() {
         openSheet({
           title: 'Already organized',
           message: `All ${preview.totalFiles} file(s) already have clean names and folder paths.\n\nUse “Export to folder” to write Movies/ and TV Shows/ onto your drive.`,
-          icon: <Check size={28} color="#60a5fa" strokeWidth={2.4} />,
-          iconColor: '#60a5fa',
+          icon: <Check size={28} color={ICON_COLOR} strokeWidth={2.4} />,
+          iconColor: ICON_COLOR,
         });
         return;
       }
@@ -597,8 +592,8 @@ export function SettingsScreen() {
         message: `${preview.wouldChange} of ${preview.totalFiles} file(s) will get clean Plex-style names and virtual folders inside FilmSort.\n\n${sampleLines}${
           preview.samples.length > 3 ? '\n\n…' : ''
         }\n\nThis only updates labels in the app. To write real folders on disk, use “Export to folder” next.`,
-        icon: <FolderTree size={28} color="#60a5fa" strokeWidth={2} />,
-        iconColor: '#60a5fa',
+        icon: <FolderTree size={28} color={ICON_COLOR} strokeWidth={2} />,
+        iconColor: ICON_COLOR,
         actions: [
           { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
           {
@@ -613,15 +608,15 @@ export function SettingsScreen() {
                   openSheet({
                     title: 'Library organized',
                     message: `Updated ${result.filesRenamed} file(s) across ${result.titlesTouched} title(s).\n\nTip: use “Export to folder” to create Movies/ and TV Shows/ on your device.`,
-                    icon: <CheckCircle2 size={28} color="#34d399" strokeWidth={2} />,
-                    iconColor: '#34d399',
+                    icon: <CheckCircle2 size={28} color={ICON_COLOR} strokeWidth={2} />,
+                    iconColor: ICON_COLOR,
                   });
                 } catch {
                   openSheet({
                     title: 'Organize failed',
                     message: 'Could not organize the library. Please try again.',
-                    icon: <AlertTriangle size={28} color="#f87171" strokeWidth={2} />,
-                    iconColor: '#f87171',
+                    icon: <AlertTriangle size={28} color={ICON_COLOR} strokeWidth={2} />,
+                    iconColor: ICON_COLOR,
                   });
                 } finally {
                   setOrganizing(false);
@@ -635,8 +630,8 @@ export function SettingsScreen() {
       openSheet({
         title: 'Organize failed',
         message: 'Could not preview organization. Please try again.',
-        icon: <AlertTriangle size={28} color="#f87171" strokeWidth={2} />,
-        iconColor: '#f87171',
+        icon: <AlertTriangle size={28} color={ICON_COLOR} strokeWidth={2} />,
+        iconColor: ICON_COLOR,
       });
     } finally {
       setOrganizing(false);
@@ -665,8 +660,8 @@ export function SettingsScreen() {
         openSheet({
           title: 'Export cancelled',
           message: 'No folder was selected.',
-          icon: <HardDriveDownload size={28} color="#a1a1aa" strokeWidth={2} />,
-          iconColor: '#a1a1aa',
+          icon: <HardDriveDownload size={28} color={ICON_COLOR} strokeWidth={2} />,
+          iconColor: ICON_COLOR,
         });
         return;
       }
@@ -675,8 +670,8 @@ export function SettingsScreen() {
         openSheet({
           title: 'Nothing to export',
           message: 'Scan some videos into your library first.',
-          icon: <HardDriveDownload size={28} color="#34d399" strokeWidth={2} />,
-          iconColor: '#34d399',
+          icon: <HardDriveDownload size={28} color={ICON_COLOR} strokeWidth={2} />,
+          iconColor: ICON_COLOR,
         });
         return;
       }
@@ -685,8 +680,8 @@ export function SettingsScreen() {
         openSheet({
           title: 'Already exported',
           message: `All ${result.skipped} file(s) are already in that folder with organized names.\n\nUse “Force re-export” only if you want to overwrite them.`,
-          icon: <Check size={28} color="#34d399" strokeWidth={2.4} />,
-          iconColor: '#34d399',
+          icon: <Check size={28} color={ICON_COLOR} strokeWidth={2.4} />,
+          iconColor: ICON_COLOR,
         });
         return;
       }
@@ -709,9 +704,9 @@ export function SettingsScreen() {
         message: `${parts.join(', ')}.${moveNote}\n\n${result.rootHint}`,
         icon:
           result.failed === 0 ? (
-            <CheckCircle2 size={28} color="#34d399" strokeWidth={2} />
+            <CheckCircle2 size={28} color={ICON_COLOR} strokeWidth={2} />
           ) : (
-            <AlertTriangle size={28} color="#facc15" strokeWidth={2} />
+            <AlertTriangle size={28} color={ICON_COLOR} strokeWidth={2} />
           ),
         iconColor: result.failed === 0 ? '#34d399' : '#facc15',
       });
@@ -720,8 +715,8 @@ export function SettingsScreen() {
       openSheet({
         title: 'Export failed',
         message: msg || 'Could not export the library.',
-        icon: <AlertTriangle size={28} color="#f87171" strokeWidth={2} />,
-        iconColor: '#f87171',
+        icon: <AlertTriangle size={28} color={ICON_COLOR} strokeWidth={2} />,
+        iconColor: ICON_COLOR,
       });
     } finally {
       setExporting(false);
@@ -743,8 +738,8 @@ export function SettingsScreen() {
     openSheet({
       title: 'Export organized library',
       message: `${platformHint}\n\nAlready-exported files are skipped so you don’t get duplicates. “Force re-export” overwrites existing organized files.`,
-      icon: <HardDriveDownload size={28} color="#34d399" strokeWidth={2} />,
-      iconColor: '#34d399',
+      icon: <HardDriveDownload size={28} color={ICON_COLOR} strokeWidth={2} />,
+      iconColor: ICON_COLOR,
       actions: [
         { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
         {
@@ -774,8 +769,8 @@ export function SettingsScreen() {
         title: 'Clear library?',
         message:
           'This will remove all scanned titles from your library. Your video files will not be deleted. This cannot be undone.',
-        icon: <Trash2 size={28} color="#f87171" strokeWidth={2} />,
-        iconColor: '#f87171',
+        icon: <Trash2 size={28} color={ICON_COLOR} strokeWidth={2} />,
+        iconColor: ICON_COLOR,
         actions: [
           { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
           {
@@ -798,8 +793,8 @@ export function SettingsScreen() {
         title: 'Clear metadata cache?',
         message:
           'Cached poster art and metadata will be removed. They will be re-fetched the next time you view your library. This is useful if posters appear incorrect.',
-        icon: <Database size={28} color="#f87171" strokeWidth={2} />,
-        iconColor: '#f87171',
+        icon: <Database size={28} color={ICON_COLOR} strokeWidth={2} />,
+        iconColor: ICON_COLOR,
         actions: [
           { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
           {
@@ -815,30 +810,6 @@ export function SettingsScreen() {
     });
   };
 
-  // ── Clear watch history ────────────────────────────────────────────────────
-  const handleClearHistory = () => {
-    void requirePinThen('history', () => {
-      openSheet({
-        title: 'Clear watch history?',
-        message:
-          'This will permanently delete your watch history and reset all badges. This cannot be undone.',
-        icon: <Trash2 size={28} color="#f87171" strokeWidth={2} />,
-        iconColor: '#f87171',
-        actions: [
-          { label: 'Cancel', variant: 'ghost', onPress: closeSheet },
-          {
-            label: 'Clear history',
-            variant: 'destructive',
-            onPress: () => {
-              closeSheet();
-              void executeClear('history');
-            },
-          },
-        ],
-      });
-    });
-  };
-
   return (
     <View style={styles.root}>
       <StatusBar barStyle="light-content" />
@@ -846,7 +817,7 @@ export function SettingsScreen() {
       {/* ── Top bar ── */}
       <View style={[styles.topBar, { paddingTop: insets.top + 6 }]}>
         <Pressable onPress={() => navigation.goBack()} hitSlop={12} style={styles.backBtn}>
-          <ChevronLeft size={22} color="#ffffff" strokeWidth={2.4} />
+          <ChevronLeft size={22} color={ICON_COLOR} strokeWidth={2.4} />
         </Pressable>
         <Text style={styles.topBarTitle}>Settings</Text>
         <View style={styles.backBtn} />
@@ -882,10 +853,10 @@ export function SettingsScreen() {
                     disabled={signingOut}
                   >
                     {signingOut ? (
-                      <ActivityIndicator size="small" color="#f87171" />
+                      <ActivityIndicator size="small" color={ICON_COLOR} />
                     ) : (
                       <>
-                        <LogOut size={13} color="#f87171" strokeWidth={2.2} />
+                        <LogOut size={13} color={ICON_COLOR} strokeWidth={2.2} />
                         <Text style={styles.hubActionDanger}>Sign out</Text>
                       </>
                     )}
@@ -907,7 +878,7 @@ export function SettingsScreen() {
                     </Text>
                   </View>
                   {signingIn ? (
-                    <ActivityIndicator size="small" color="#a1a1aa" />
+                    <ActivityIndicator size="small" color={ICON_COLOR} />
                   ) : (
                     <View style={styles.hubCtaSecondary}>
                       <Text style={styles.hubCtaSecondaryText}>Sign in</Text>
@@ -925,7 +896,7 @@ export function SettingsScreen() {
               {hasPin ? (
                 <View style={styles.hubRow}>
                   <View style={[styles.hubIcon, styles.hubIconPro]}>
-                    <Lock size={16} color="#c4b5fd" strokeWidth={2.1} />
+                    <Lock size={16} color={ICON_COLOR} strokeWidth={2.1} />
                   </View>
                   <View style={styles.hubBody}>
                     <View style={styles.hubTitleRow}>
@@ -940,11 +911,11 @@ export function SettingsScreen() {
                   </View>
                   <View style={styles.hubActionGroup}>
                     <Pressable style={styles.hubAction} onPress={() => openPin('change')}>
-                      <KeyRound size={13} color="#a1a1aa" strokeWidth={2.2} />
+                      <KeyRound size={13} color={ICON_COLOR} strokeWidth={2.2} />
                       <Text style={styles.hubActionText}>Edit</Text>
                     </Pressable>
                     <Pressable style={styles.hubAction} onPress={() => openPin('remove')}>
-                      <ShieldOff size={13} color="#f87171" strokeWidth={2.2} />
+                      <ShieldOff size={13} color={ICON_COLOR} strokeWidth={2.2} />
                     </Pressable>
                   </View>
                 </View>
@@ -954,7 +925,7 @@ export function SettingsScreen() {
                   onPress={() => openPin('set')}
                 >
                   <View style={[styles.hubIcon, styles.hubIconPro]}>
-                    <Lock size={16} color="#c4b5fd" strokeWidth={2.1} />
+                    <Lock size={16} color={ICON_COLOR} strokeWidth={2.1} />
                   </View>
                   <View style={styles.hubBody}>
                     <Text style={styles.hubTitle}>Set a 4-digit PIN</Text>
@@ -962,7 +933,7 @@ export function SettingsScreen() {
                       Protect destructive data actions
                     </Text>
                   </View>
-                  <ChevronRight size={16} color="#3f3f46" strokeWidth={2.2} />
+                  <ChevronRight size={16} color={ICON_COLOR} strokeWidth={2.2} />
                 </Pressable>
               )}
             </View>
@@ -975,8 +946,8 @@ export function SettingsScreen() {
               <View style={styles.hubRow}>
                 <View style={[styles.hubIcon, isPro ? styles.hubIconPro : styles.hubIconFree]}>
                   {isPro
-                    ? <Crown size={16} color="#c4b5fd" strokeWidth={2.1} />
-                    : <Sparkles size={16} color="#facc15" strokeWidth={2.1} />}
+                    ? <Crown size={16} color={ICON_COLOR} strokeWidth={2.1} />
+                    : <Sparkles size={16} color={ICON_COLOR} strokeWidth={2.1} />}
                 </View>
                 <View style={styles.hubBody}>
                   <View style={styles.hubTitleRow}>
@@ -1016,15 +987,12 @@ export function SettingsScreen() {
                 </View>
                 {!isPro && (
                   <Pressable
-                    style={[styles.hubCta, purchasing && styles.btnDisabled]}
+                    style={styles.hubCta}
                     onPress={handlePurchase}
-                    disabled={purchasing}
+                    accessibilityRole="button"
+                    accessibilityLabel="Enter Pro code"
                   >
-                    {purchasing ? (
-                      <ActivityIndicator color="#0a0a0a" size="small" />
-                    ) : (
-                      <Text style={styles.hubCtaText}>Upgrade</Text>
-                    )}
+                    <Text style={styles.hubCtaText}>Enter Code</Text>
                   </Pressable>
                 )}
               </View>
@@ -1039,7 +1007,7 @@ export function SettingsScreen() {
                 disabled={organizing || exporting}
               >
                 <View style={[styles.hubIcon, styles.hubIconOrganize]}>
-                  <FolderTree size={16} color="#60a5fa" strokeWidth={2.1} />
+                  <FolderTree size={16} color={ICON_COLOR} strokeWidth={2.1} />
                 </View>
                 <View style={styles.hubBody}>
                   <View style={styles.hubTitleRow}>
@@ -1057,9 +1025,9 @@ export function SettingsScreen() {
                   </Text>
                 </View>
                 {organizing ? (
-                  <ActivityIndicator color="#60a5fa" size="small" />
+                  <ActivityIndicator color={ICON_COLOR} size="small" />
                 ) : (
-                  <ChevronRight size={18} color="#52525b" strokeWidth={2} />
+                  <ChevronRight size={18} color={ICON_COLOR} strokeWidth={2} />
                 )}
               </Pressable>
 
@@ -1071,7 +1039,7 @@ export function SettingsScreen() {
                 disabled={organizing || exporting}
               >
                 <View style={[styles.hubIcon, styles.hubIconExport]}>
-                  <HardDriveDownload size={16} color="#34d399" strokeWidth={2.1} />
+                  <HardDriveDownload size={16} color={ICON_COLOR} strokeWidth={2.1} />
                 </View>
                 <View style={styles.hubBody}>
                   <View style={styles.hubTitleRow}>
@@ -1093,9 +1061,9 @@ export function SettingsScreen() {
                   </Text>
                 </View>
                 {exporting ? (
-                  <ActivityIndicator color="#34d399" size="small" />
+                  <ActivityIndicator color={ICON_COLOR} size="small" />
                 ) : (
-                  <ChevronRight size={18} color="#52525b" strokeWidth={2} />
+                  <ChevronRight size={18} color={ICON_COLOR} strokeWidth={2} />
                 )}
               </Pressable>
             </View>
@@ -1119,7 +1087,7 @@ export function SettingsScreen() {
           <SectionHeader label="Legal" />
           <View style={styles.card}>
             <NavRow
-              icon={<Shield size={16} color="#60a5fa" strokeWidth={2} />}
+              icon={<Shield size={16} color={ICON_COLOR} strokeWidth={2} />}
               label="Privacy Policy"
               subtitle="How we handle your data"
               tint="#60a5fa"
@@ -1127,7 +1095,7 @@ export function SettingsScreen() {
             />
             <View style={styles.divider} />
             <NavRow
-              icon={<FileText size={16} color="#a78bfa" strokeWidth={2} />}
+              icon={<FileText size={16} color={ICON_COLOR} strokeWidth={2} />}
               label="Terms of Use"
               subtitle="Rules for using FilmSort"
               tint="#a78bfa"
@@ -1141,17 +1109,17 @@ export function SettingsScreen() {
           <SectionHeader label="Attributions" />
           <View style={styles.card}>
             <NavRow
-              icon={<Film size={16} color="#facc15" strokeWidth={2} />}
+              icon={<Film size={16} color={ICON_COLOR} strokeWidth={2} />}
               label="The Movie Database (TMDB)"
-              subtitle="Poster art, ratings, and metadata"
+              subtitle="Poster and Backdrop"
               tint="#facc15"
               onPress={() => Linking.openURL('https://www.themoviedb.org').catch(() => {})}
             />
             <View style={styles.divider} />
             <NavRow
-              icon={<ExternalLink size={16} color="#34d399" strokeWidth={2} />}
+              icon={<ExternalLink size={16} color={ICON_COLOR} strokeWidth={2} />}
               label="Jikan / MyAnimeList"
-              subtitle="Anime metadata and episode data"
+              subtitle="Anime episode metadata"
               tint="#34d399"
               onPress={() => Linking.openURL('https://jikan.moe').catch(() => {})}
             />
@@ -1159,7 +1127,7 @@ export function SettingsScreen() {
 
           {/* Mandatory TMDB disclaimer */}
           <View style={styles.tmdbDisclaimer}>
-            <Info size={13} color="#52525b" strokeWidth={2} style={{ marginTop: 1 }} />
+            <Info size={13} color={ICON_COLOR} strokeWidth={2} style={{ marginTop: 1 }} />
             <Text style={styles.tmdbDisclaimerText}>
               This product uses the TMDB API but is not endorsed or certified by TMDB.
             </Text>
@@ -1171,7 +1139,7 @@ export function SettingsScreen() {
           <SectionHeader label="Data" />
           <View style={styles.card}>
             <DestructiveRow
-              icon={<Database size={16} color="#f87171" strokeWidth={2} />}
+              icon={<Database size={16} color={ICON_COLOR} strokeWidth={2} />}
               label="Clear Metadata Cache"
               subtitle={hasPin ? 'PIN required · Re-fetch posters & metadata' : 'Re-fetch posters and metadata'}
               onPress={handleClearCache}
@@ -1179,7 +1147,7 @@ export function SettingsScreen() {
             />
             <View style={styles.divider} />
             <DestructiveRow
-              icon={<Trash2 size={16} color="#f87171" strokeWidth={2} />}
+              icon={<Trash2 size={16} color={ICON_COLOR} strokeWidth={2} />}
               label="Clear Library"
               subtitle={hasPin ? 'PIN required · Removes scanned titles only' : 'Removes all scanned titles — not your video files'}
               onPress={handleClearLibrary}
@@ -1187,15 +1155,7 @@ export function SettingsScreen() {
             />
             <View style={styles.divider} />
             <DestructiveRow
-              icon={<Trash2 size={16} color="#f87171" strokeWidth={2} />}
-              label="Clear Watch History"
-              subtitle={hasPin ? 'PIN required · Resets history & badges' : 'Deletes history and resets all badges'}
-              onPress={handleClearHistory}
-              loading={clearingHistory}
-            />
-            <View style={styles.divider} />
-            <DestructiveRow
-              icon={<UserX size={16} color="#f87171" strokeWidth={2} />}
+              icon={<UserX size={16} color={ICON_COLOR} strokeWidth={2} />}
               label="Delete Account"
               subtitle={
                 hasPin
@@ -1211,12 +1171,87 @@ export function SettingsScreen() {
         </Animated.View>
       </ScrollView>
 
+      {/* ── Account name confirmation modal ── */}
+      <Modal
+        visible={accountNameModalVisible}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={closeAccountNameModal}
+      >
+        <KeyboardAvoidingView
+          style={styles.nameModalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <Pressable style={styles.nameModalBackdrop} onPress={closeAccountNameModal} />
+          <View style={styles.nameModalCard}>
+            <View style={styles.nameModalIconWrap}>
+              <UserX size={26} color={ICON_COLOR} strokeWidth={2} />
+            </View>
+            <Text style={styles.nameModalTitle}>Confirm deletion</Text>
+            <Text style={styles.nameModalBody}>
+              {getExpectedAccountName()
+                ? `Type your account name to confirm:  `
+                : 'Type anything to confirm deletion of all local data:'}
+            </Text>
+            {getExpectedAccountName() ? (
+              <Text style={styles.nameModalHint}>
+                {getExpectedAccountName()}
+              </Text>
+            ) : null}
+            <TextInput
+              ref={accountNameInputRef}
+              style={[
+                styles.nameModalInput,
+                accountNameError && styles.nameModalInputError,
+              ]}
+              placeholder={getExpectedAccountName() || 'confirm'}
+              placeholderTextColor="#52525b"
+              value={accountNameInput}
+              onChangeText={(t) => { setAccountNameInput(t); setAccountNameError(false); }}
+              autoCapitalize="words"
+              autoCorrect={false}
+              returnKeyType="done"
+              onSubmitEditing={handleAccountNameConfirm}
+            />
+            {accountNameError && (
+              <Text style={styles.nameModalError}>
+                Name doesn’t match. Try again.
+              </Text>
+            )}
+            <View style={styles.nameModalActions}>
+              <Pressable
+                style={({ pressed }) => [styles.nameModalBtn, styles.nameModalBtnCancel, pressed && { opacity: 0.7 }]}
+                onPress={closeAccountNameModal}
+              >
+                <Text style={styles.nameModalBtnCancelText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                style={({ pressed }) => [styles.nameModalBtn, styles.nameModalBtnDelete, pressed && { opacity: 0.7 }]}
+                onPress={handleAccountNameConfirm}
+              >
+                <Text style={styles.nameModalBtnDeleteText}>Delete</Text>
+              </Pressable>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
       <ProPaywallModal
         visible={showPaywall}
         onClose={() => setShowPaywall(false)}
         onPurchaseSuccess={async () => {
           await refreshPro();
           setShowPaywall(false);
+        }}
+      />
+
+      <ProCodeModal
+        visible={proCodeOpen}
+        onClose={() => setProCodeOpen(false)}
+        onSuccess={async () => {
+          await refreshPro();
+          setProCodeOpen(false);
         }}
       />
 
@@ -1315,6 +1350,9 @@ const styles = StyleSheet.create({
     borderRadius: 9,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
     flexShrink: 0,
   },
   rowBody: {
@@ -1409,20 +1447,20 @@ const styles = StyleSheet.create({
     flexShrink: 0,
   },
   hubIconPro: {
-    backgroundColor: 'rgba(167,139,250,0.14)',
-    borderColor: 'rgba(167,139,250,0.28)',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderColor: 'rgba(255,255,255,0.08)',
   },
   hubIconFree: {
-    backgroundColor: 'rgba(250,204,21,0.1)',
-    borderColor: 'rgba(250,204,21,0.22)',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderColor: 'rgba(255,255,255,0.08)',
   },
   hubIconOrganize: {
-    backgroundColor: 'rgba(96,165,250,0.12)',
-    borderColor: 'rgba(96,165,250,0.28)',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderColor: 'rgba(255,255,255,0.08)',
   },
   hubIconExport: {
-    backgroundColor: 'rgba(52,211,153,0.12)',
-    borderColor: 'rgba(52,211,153,0.28)',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderColor: 'rgba(255,255,255,0.08)',
   },
   hubToolsDivider: {
     height: StyleSheet.hairlineWidth,
@@ -1430,8 +1468,8 @@ const styles = StyleSheet.create({
     marginLeft: 52,
   },
   hubIconGoogle: {
-    backgroundColor: 'rgba(66,133,244,0.12)',
-    borderColor: 'rgba(66,133,244,0.28)',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderColor: 'rgba(255,255,255,0.08)',
   },
   googleG: {
     color: '#4285F4',
@@ -1561,5 +1599,119 @@ const styles = StyleSheet.create({
   },
   btnDisabled: {
     opacity: 0.55,
+  },
+
+  // ─── Account name confirmation modal ────────────────────────────────────
+  nameModalOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    alignItems: 'stretch',
+  },
+  nameModalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+  },
+  nameModalCard: {
+    backgroundColor: '#111114',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    borderWidth: 1,
+    borderBottomWidth: 0,
+    borderColor: 'rgba(255,255,255,0.09)',
+    paddingHorizontal: 24,
+    paddingTop: 28,
+    paddingBottom: 36,
+    gap: 12,
+    alignItems: 'center',
+  },
+  nameModalIconWrap: {
+    width: 52,
+    height: 52,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
+  },
+  nameModalTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: -0.3,
+    textAlign: 'center',
+  },
+  nameModalBody: {
+    color: '#71717a',
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 19,
+  },
+  nameModalHint: {
+    color: '#a1a1aa',
+    fontSize: 14,
+    fontWeight: '700',
+    textAlign: 'center',
+    letterSpacing: 0.1,
+    marginTop: -4,
+  },
+  nameModalInput: {
+    alignSelf: 'stretch',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 12,
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '600',
+    paddingHorizontal: 16,
+    paddingVertical: 13,
+    marginTop: 4,
+    textAlign: 'center',
+  },
+  nameModalInputError: {
+    borderColor: '#f87171',
+    backgroundColor: 'rgba(248,113,113,0.06)',
+  },
+  nameModalError: {
+    color: '#f87171',
+    fontSize: 12,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: -4,
+  },
+  nameModalActions: {
+    flexDirection: 'row',
+    gap: 10,
+    alignSelf: 'stretch',
+    marginTop: 8,
+  },
+  nameModalBtn: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  nameModalBtnCancel: {
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  nameModalBtnCancelText: {
+    color: '#a1a1aa',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  nameModalBtnDelete: {
+    backgroundColor: 'rgba(248,113,113,0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(248,113,113,0.3)',
+  },
+  nameModalBtnDeleteText: {
+    color: '#f87171',
+    fontSize: 14,
+    fontWeight: '800',
   },
 });

@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { View, StyleSheet, ScrollView } from 'react-native';
+import { View, StyleSheet, ScrollView, Text, Pressable } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Animated, { FadeInDown } from 'react-native-reanimated';
+import { Crown } from 'lucide-react-native';
 import { Scanner } from '../components/Scanner';
 import { FloatingHeader } from '../components/FloatingHeader';
 import { UnmatchedFilesList } from '../components/UnmatchedFilesList';
@@ -10,10 +12,65 @@ import { LegalConsentGate } from '../components/LegalConsentGate';
 import { MediaScanResult, LocalFile, MediaItem } from '../types';
 import { storageService } from '../storage/asyncStorage';
 import { legalConsentService } from '../services/legalConsentService';
+import { usePro } from '../context/ProContext';
+import { FREE_SCAN_LIMIT } from '../storage/proStatusService';
 
 function matchedFileKey(item: MediaItem): string {
   return `${item.id}::${item.localFile?.uri ?? ''}::${item.localFile?.filename ?? ''}`;
 }
+
+// ─── ScansBanner ──────────────────────────────────────────────────────────────
+// Shows "You've used X/Y free AI Scans" above the scanner when not Pro.
+
+function ScansBanner() {
+  const navigation = useNavigation<any>();
+  const { isPro, scansUsed, scansRemaining } = usePro();
+  if (isPro) return null;
+  return (
+    <Animated.View entering={FadeInDown.duration(320)}>
+      <Pressable
+        style={({ pressed }) => [scansBannerStyles.card, pressed && { opacity: 0.85 }]}
+        onPress={() => navigation.navigate('Settings')}
+      >
+        <View style={scansBannerStyles.iconRing}>
+          <Crown size={16} color="#a78bfa" strokeWidth={2} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={scansBannerStyles.title}>
+            {scansRemaining > 0
+              ? `You've used ${scansUsed}/${FREE_SCAN_LIMIT} free AI Scans`
+              : 'Monthly scan limit reached'}
+          </Text>
+          <Text style={scansBannerStyles.subtitle}>Tap to unlock unlimited Pro scanning</Text>
+        </View>
+      </Pressable>
+    </Animated.View>
+  );
+}
+
+const scansBannerStyles = StyleSheet.create({
+  card: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: 'rgba(167,139,250,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(167,139,250,0.22)',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 12,
+  },
+  iconRing: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    backgroundColor: 'rgba(167,139,250,0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  title: { fontSize: 13, fontWeight: '700', color: '#e4e4e7' },
+  subtitle: { fontSize: 11, color: '#71717a', marginTop: 2 },
+});
 
 export function ScannerScreen() {
   const [headerHeight, setHeaderHeight] = useState(0);
@@ -154,9 +211,10 @@ export function ScannerScreen() {
         onSettingsPress={() => navigation.navigate('Settings')}
       />
       <ScrollView
-        contentContainerStyle={[styles.scroll, { paddingTop: headerHeight + 24, paddingBottom: insets.bottom + 24 }]}
+        contentContainerStyle={[styles.scroll, { paddingTop: headerHeight + 24, paddingBottom: insets.bottom + 160 }]}
         showsVerticalScrollIndicator={false}
       >
+        <ScansBanner />
         <Scanner onScanComplete={handleScanComplete} />
 
         {recentLoaded && (
@@ -183,11 +241,15 @@ export function ScannerScreen() {
           onDecline={handleConsentDeclined}
         />
       )}
+
+      {/* Scanner is now a first-class tab inside MainTabs — no embedded TabNavigator here. */}
     </View>
   );
 }
+
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000000' },
   scroll: { paddingHorizontal: 16 },
 });
+

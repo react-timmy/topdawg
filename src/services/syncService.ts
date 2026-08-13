@@ -17,6 +17,7 @@
  *  memories/{mediaId}        — one doc per unique poster entry (PosterEntry)
  *  watchlist/{itemId}        — one doc per MediaItem in the user's watchlist
  *  starred/{mediaId}         — one doc per starred library item (StarredEntry)
+ *  collections/{collectionId} — one doc per backed-up Collection (Pro users only)
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -26,7 +27,8 @@ import { watchlistService } from '../storage/watchlistService';
 import { storageService, suppressStarHook } from '../storage/asyncStorage';
 import { cloudStarredService, CloudStarredEntry } from '../storage/cloudStarredService';
 import { profileService, LocalProfile } from '../storage/profileService';
-import { MediaItem } from '../types';
+import { collectionsService, suppressCollectionHook } from '../storage/collectionsService';
+import { MediaItem, Collection, CollectionCloudEntry } from '../types';
 import { ENABLE_CLOUD_SYNC } from '../config/env';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -81,6 +83,10 @@ function watchlistCollection(uid: string) {
 
 function starredCollection(uid: string) {
   return firestore().collection('users').doc(uid).collection('starred');
+}
+
+function collectionsCollection(uid: string) {
+  return firestore().collection('users').doc(uid).collection('collections');
 }
 
 function profileDoc(uid: string) {
@@ -152,6 +158,34 @@ async function batchWriteWatchlist(uid: string, items: MediaItem[]): Promise<voi
   }
 }
 
+/**
+ * Upload collections to Firestore in batches of up to 500.
+ * Throws on the first batch failure — caller handles the pending flag.
+ * Only uploads collections with backedUp=true (Pro users only).
+ */
+async function batchWriteCollections(uid: string, collections: Collection[]): Promise<void> {
+  if (collections.length === 0) return;
+
+  const col = collectionsCollection(uid);
+
+  for (let i = 0; i < collections.length; i += FIRESTORE_BATCH_LIMIT) {
+    const chunk = collections.slice(i, i + FIRESTORE_BATCH_LIMIT);
+    const batch = firestore().batch();
+    for (const collection of chunk) {
+      const entry: CollectionCloudEntry = {
+        id: collection.id,
+        name: collection.name,
+        listType: collection.listType,
+        items: collection.items,
+        createdAt: collection.createdAt,
+        updatedAt: collection.updatedAt,
+      };
+      batch.set(col.doc(collection.id), entry);
+    }
+    await batch.commit();
+  }
+}
+
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export const syncService = {
@@ -175,6 +209,7 @@ export const syncService = {
         syncService.syncMemories(uid),
         syncService.syncWatchlist(uid),
         syncService.syncStarred(uid),
+        syncService.syncCollections(uid),
       ]);
 
       // Fetch both sides concurrently
@@ -395,10 +430,55 @@ export const syncService = {
       },
     );
 
+    // ── Collections listener ──────────────────────────────────────────────────
+    // When a backed-up collection changes on another device, apply changes locally.
+    const unsubCollections = collectionsCollection(uid).onSnapshot(
+      async (snapshot) => {
+        if (snapshot.docChanges().length === 0) return;
+
+        try {
+          // Rebuild backed-up collections from cloud snapshot
+          const cloudCollections: CollectionCloudEntry[] = snapshot.docs.map(
+            (d) => d.data() as CollectionCloudEntry,
+          );
+
+          const local = await collectionsService.getAll();
+          const cloudIds = new Set(cloudCollections.map((c) => c.id));
+          
+          // Convert cloud entries to full Collection objects
+          const cloudAsCollections: Collection[] = cloudCollections.map((c) => ({
+            ...c,
+            backedUp: true, // Cloud collections are always backed up
+          }));
+
+          // Keep local-only collections (not backed up or not yet pushed)
+          const localOnly = local.filter((c) => !cloudIds.has(c.id));
+
+          // Merge: cloud collections first, then local-only
+          const merged = [...cloudAsCollections, ...localOnly];
+
+          // Suppress hook to avoid echoing back to Firestore
+          suppressCollectionHook(true);
+          try {
+            await collectionsService._replaceAll(merged);
+          } finally {
+            suppressCollectionHook(false);
+          }
+        } catch (err) {
+          suppressCollectionHook(false);
+          console.warn('[SyncService] collections listener merge failed:', err);
+        }
+      },
+      (err) => {
+        console.warn('[SyncService] collections onSnapshot error:', err);
+      },
+    );
+
     return () => {
       unsubHistory();
       unsubWatchlist();
       unsubStarred();
+      unsubCollections();
     };
   },
 
@@ -449,6 +529,7 @@ export const syncService = {
         deleteCollection(memoriesCollection(uid)),
         deleteCollection(watchlistCollection(uid)),
         deleteCollection(starredCollection(uid)),
+        deleteCollection(collectionsCollection(uid)),
       ]);
 
       // Delete profile doc
@@ -741,18 +822,28 @@ export const syncService = {
 
       const cloudData = cloudSnap.data() as LocalProfile & { updatedAt?: string };
       const cloudUpdatedAt = cloudData.updatedAt ?? '';
-      // We don't store updatedAt locally, so we compare by checking if
-      // the cloud version has a timestamp at all. If it does, cloud wins
-      // (another device wrote it more recently). If it doesn't, upload local.
-      if (cloudUpdatedAt) {
-        // Cloud has an explicit timestamp — use it as the authoritative version
+      // Read the locally-stored updatedAt (written by profileService.save).
+      // Both sides now carry a timestamp, so we can do a true last-write-wins.
+      const localRaw = await AsyncStorage.getItem('@filmsort:local_profile').catch(() => null);
+      const localUpdatedAt: string =
+        (localRaw ? (JSON.parse(localRaw) as { updatedAt?: string }).updatedAt : undefined) ?? '';
+
+      if (cloudUpdatedAt && cloudUpdatedAt > localUpdatedAt) {
+        // Cloud profile is newer — overwrite local (suppress hook to avoid
+        // immediately echoing it back to Firestore).
         const { updatedAt: _ignored, ...cloudProfile } = cloudData;
-        await profileService.save(cloudProfile as LocalProfile);
+        const current = await profileService.get();
+        const merged = { ...current, ...(cloudProfile as LocalProfile) };
+        await AsyncStorage.setItem('@filmsort:local_profile', JSON.stringify({
+          ...merged,
+          updatedAt: cloudUpdatedAt,
+        }));
+        // No hook call here — cloud is already the source of truth
       } else {
-        // No cloud timestamp — push local up
+        // Local is newer (or cloud has no timestamp) — push local up
         await profileDoc(uid).set({
           ...localProfile,
-          updatedAt: new Date().toISOString(),
+          updatedAt: localUpdatedAt || new Date().toISOString(),
         });
       }
     } catch (err) {
@@ -851,6 +942,130 @@ export const syncService = {
       await batchWritePosters(uid, toUpload);
     } catch (err) {
       console.warn('[SyncService] syncMemories failed, marking sync pending:', err);
+      await setPending();
+      throw err;
+    }
+  },
+
+  // ─── Collections sync ─────────────────────────────────────────────────────
+
+  /**
+   * Push a collection update to Firestore. Fire-and-forget — never throws.
+   * Called by AccountProvider via the setOnCollectionChanged hook.
+   * Only pushes collections with backedUp=true (Pro users only).
+   */
+  async pushCollection(uid: string, collection: Collection): Promise<void> {
+    if (!ENABLE_CLOUD_SYNC || !collection.backedUp) return;
+
+    try {
+      const entry: CollectionCloudEntry = {
+        id: collection.id,
+        name: collection.name,
+        listType: collection.listType,
+        items: collection.items,
+        createdAt: collection.createdAt,
+        updatedAt: collection.updatedAt,
+      };
+      await collectionsCollection(uid).doc(collection.id).set(entry);
+    } catch (err) {
+      console.warn('[SyncService] pushCollection failed, marking sync pending:', err);
+      await setPending();
+    }
+  },
+
+  /**
+   * Remove a collection from Firestore. Fire-and-forget — never throws.
+   * Called by AccountProvider via the setOnCollectionChanged hook when deleting.
+   */
+  async pushCollectionDelete(uid: string, id: string): Promise<void> {
+    if (!ENABLE_CLOUD_SYNC) return;
+
+    try {
+      await collectionsCollection(uid).doc(id).delete();
+    } catch (err) {
+      console.warn('[SyncService] pushCollectionDelete failed, marking sync pending:', err);
+      await setPending();
+    }
+  },
+
+  /**
+   * Merge local backed-up collections with the cloud collections.
+   *
+   * Strategy: union merge — backed-up collections exist on both sides.
+   * Only collections with backedUp=true are synced to Firestore.
+   * Conflict resolution: newer updatedAt wins.
+   * Lists (listType='list') are never backed up to cloud.
+   *
+   * Called as part of initialSync after sign-in.
+   */
+  async syncCollections(uid: string): Promise<void> {
+    if (!ENABLE_CLOUD_SYNC) return;
+
+    try {
+      const [localCollections, cloudSnap] = await Promise.all([
+        collectionsService.getAll(),
+        collectionsCollection(uid).get(),
+      ]);
+
+      const cloudEntries: CollectionCloudEntry[] = cloudSnap.docs.map(
+        (d) => d.data() as CollectionCloudEntry,
+      );
+
+      const cloudById = new Map<string, CollectionCloudEntry>(
+        cloudEntries.map((e) => [e.id, e]),
+      );
+
+      // Local backed-up collections not in cloud or with newer updatedAt → upload
+      const backedUpCollections = localCollections.filter((c) => c.backedUp);
+      const toUpload: Collection[] = [];
+      
+      for (const local of backedUpCollections) {
+        const cloud = cloudById.get(local.id);
+        if (!cloud || local.updatedAt > cloud.updatedAt) {
+          toUpload.push(local);
+        }
+      }
+
+      // Cloud collections not in local or with newer updatedAt → download
+      const localById = new Map<string, Collection>(
+        localCollections.map((c) => [c.id, c]),
+      );
+      
+      const toDownload: Collection[] = [];
+      for (const cloudEntry of cloudEntries) {
+        const local = localById.get(cloudEntry.id);
+        if (!local || cloudEntry.updatedAt > local.updatedAt) {
+          toDownload.push({
+            ...cloudEntry,
+            backedUp: true, // Cloud collections are always backed up
+          });
+        }
+      }
+
+      // Merge: update local collections with cloud changes
+      if (toDownload.length > 0) {
+        suppressCollectionHook(true);
+        try {
+          for (const cloudCollection of toDownload) {
+            const local = localById.get(cloudCollection.id);
+            if (local) {
+              // Update existing
+              await collectionsService.update(cloudCollection.id, cloudCollection);
+            } else {
+              // Add new from cloud
+              const merged = [cloudCollection, ...localCollections];
+              await collectionsService._replaceAll(merged);
+            }
+          }
+        } finally {
+          suppressCollectionHook(false);
+        }
+      }
+
+      // Upload local-only or newer collections
+      await batchWriteCollections(uid, toUpload);
+    } catch (err) {
+      console.warn('[SyncService] syncCollections failed, marking sync pending:', err);
       await setPending();
       throw err;
     }

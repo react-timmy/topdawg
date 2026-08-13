@@ -10,7 +10,7 @@ export default ({ config }) => ({
   userInterfaceStyle: "dark",
   newArchEnabled: true,
   updates: {
-    url: "https://u.expo.dev/3a0b553f-3175-4b67-999b-8c95abf703dd"
+    url: "https://u.expo.dev/d9ce499e-9bc0-48a6-8fa2-f19bd6c7b0b4"
   },
   runtimeVersion: {
     policy: "appVersion"
@@ -73,7 +73,7 @@ export default ({ config }) => ({
   ],
   extra: {
     eas: {
-      projectId: "3a0b553f-3175-4b67-999b-8c95abf703dd",
+      projectId: "d9ce499e-9bc0-48a6-8fa2-f19bd6c7b0b4",
     },
     // Proxy base URL — the ONLY runtime value the app needs.
     // Real keys (TMDB, Gemini) live in Cloudflare Worker Secrets, never here.
@@ -81,5 +81,5 @@ export default ({ config }) => ({
     // Set EXPO_PUBLIC_PROXY_BASE_URL in .env after deploying the worker.
     proxyBaseUrl: process.env.EXPO_PUBLIC_PROXY_BASE_URL ?? "",
   },
-  owner: "solotimmy",
+  owner: "solodevtimmys-team",
 });

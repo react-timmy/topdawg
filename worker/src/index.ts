@@ -17,8 +17,14 @@
  *
  * Secrets (set via `wrangler secret put`):
  *   TMDB_API_KEY             — TMDB v3 read key
- *   GEMINI_API_KEY           — Free-tier Gemini key
- *   GEMINI_PRO_API_KEY       — Optional Pro VIP key
+ *   GEMINI_API_KEY           — Free-tier Gemini key (primary)
+ *   GEMINI_API_KEY_2         — Free-tier Gemini key (backup 2)
+ *   GEMINI_API_KEY_3         — Free-tier Gemini key (backup 3)
+ *   GEMINI_API_KEY_4         — Free-tier Gemini key (backup 4)
+ *   GEMINI_API_KEY_5         — Free-tier Gemini key (backup 5)
+ *   GEMINI_PRO_API_KEY       — Pro VIP Gemini key (primary)
+ *   GEMINI_PRO_API_KEY_2     — Pro VIP Gemini key (backup 2)
+ *   GEMINI_PRO_API_KEY_3     — Pro VIP Gemini key (backup 3)
  *   OPENSUBTITLES_API_KEY    — Free OpenSubtitles REST API key
  *                              Register free at https://www.opensubtitles.com/en/consumers
  *                              Free tier: 5 downloads/day anonymous, 20/day with account
@@ -30,8 +36,17 @@
 // ── Env type ──────────────────────────────────────────────────────────────────
 interface Env {
   TMDB_API_KEY: string;
+  // Free-tier Gemini key pool (GEMINI_API_KEY_2 … _5 are optional extras).
+  // The worker tries each key in turn on 429 so you get ~5× the quota.
   GEMINI_API_KEY: string;
+  GEMINI_API_KEY_2?: string;
+  GEMINI_API_KEY_3?: string;
+  GEMINI_API_KEY_4?: string;
+  GEMINI_API_KEY_5?: string;
+  // Pro key pool — same idea, set as many as you need.
   GEMINI_PRO_API_KEY?: string;
+  GEMINI_PRO_API_KEY_2?: string;
+  GEMINI_PRO_API_KEY_3?: string;
   FIREBASE_PROJECT_ID: string;
   OPENSUBTITLES_API_KEY?: string;
 }
@@ -299,12 +314,28 @@ async function handleGemini(request: Request, env: Env): Promise<Response> {
     geminiBody.systemInstruction = { parts: [{ text: systemInstruction }] };
   }
 
-  // Key pool: Pro key first if requested and configured, then free key
-  const proKey = (env.GEMINI_PRO_API_KEY ?? '').trim();
-  const freeKey = env.GEMINI_API_KEY.trim();
-  const keyPool: string[] = [];
-  if (isPro && proKey) keyPool.push(proKey);
-  if (freeKey) keyPool.push(freeKey);
+  // Build key pools from all configured secrets.
+  // Pro requests try the pro pool first, then fall back to the free pool.
+  // Each pool is tried in order; a 429 on any key/model moves to the next.
+  const proKeys: string[] = [
+    env.GEMINI_PRO_API_KEY,
+    env.GEMINI_PRO_API_KEY_2,
+    env.GEMINI_PRO_API_KEY_3,
+  ].map((k) => (k ?? '').trim()).filter(Boolean);
+
+  const freeKeys: string[] = [
+    env.GEMINI_API_KEY,
+    env.GEMINI_API_KEY_2,
+    env.GEMINI_API_KEY_3,
+    env.GEMINI_API_KEY_4,
+    env.GEMINI_API_KEY_5,
+  ].map((k) => (k ?? '').trim()).filter(Boolean);
+
+  // For Pro requests: pro keys first, then free keys as fallback.
+  // For free requests: free keys only.
+  const keyPool: string[] = isPro
+    ? [...proKeys, ...freeKeys]
+    : freeKeys;
 
   if (keyPool.length === 0) {
     return err('No Gemini keys configured on server', 503);

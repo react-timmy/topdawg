@@ -83,10 +83,11 @@ export function parseLocalFilename(filename: string): LocalParseResult | null {
   let title = work;
   let confidence = 0.55;
 
-  // S01E02 / S1EP3 / 1x02
+  // S01E02 / S1EP3 / 1x02 / Season2_EP7 / Season 2 EP 7
   const se =
     work.match(/^(.*?)\s*[sS](\d{1,2})\s*[eE][pP]?(\d{1,3})\b(.*)$/) ||
-    work.match(/^(.*?)\s*(\d{1,2})\s*[xX]\s*(\d{1,3})\b(.*)$/);
+    work.match(/^(.*?)\s*(\d{1,2})\s*[xX]\s*(\d{1,3})\b(.*)$/) ||
+    work.match(/^(.*?)\s*[Ss]eason\s*(\d{1,2})\s*[Ee][Pp]?\s*(\d{1,3})\b(.*)$/);
   if (se) {
     title = se[1].trim();
     season = parseInt(se[2], 10);

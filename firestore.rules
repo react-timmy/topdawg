@@ -61,5 +61,12 @@ service cloud.firestore {
         allow update, delete: if false;
       }
     }
+
+    // ── Collection Group Query: Members ───────────────────────────────────
+    // Allow authenticated users to query across all members subcollections
+    // to find rooms they're participating in (used by getUserActiveRooms)
+    match /{path=**}/members/{uid} {
+      allow read: if request.auth != null;
+    }
   }
 }

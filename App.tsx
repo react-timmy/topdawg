@@ -5,11 +5,10 @@ import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { NotificationProvider } from "./src/context/NotificationContext";
 import { ProProvider } from "./src/context/ProContext";
-import { BadgeUnlockProvider } from "./src/context/BadgeUnlockContext";
 import { AccountProvider } from "./src/context/AccountContext";
 import { CastProvider } from "./src/context/CastContext";
 import { WatchPartyProvider } from "./src/context/WatchPartyContext";
-import { BadgeUnlockOverlay } from "./src/components/BadgeUnlockOverlay";
+import { CollectionsProvider } from "./src/context/CollectionsContext";
 import { setupNotificationTapHandler } from "./src/services/notificationService";
 import { RootNavigator } from "./src/navigation/RootNavigator";
 import { navigationRef } from "./src/navigation/navigationRef";
@@ -41,7 +40,7 @@ export default function App() {
             <CastProvider>
               <WatchPartyProvider>
                 <ProProvider>
-                  <BadgeUnlockProvider>
+                  <CollectionsProvider>
                     {/*
                       NavigationContainer handles our routing.
                       We no longer reset navigation on resume, so users stay where they were unless they cold-boot the app.
@@ -52,8 +51,7 @@ export default function App() {
                     >
                       <RootNavigator />
                     </NavigationContainer>
-                    <BadgeUnlockOverlay />
-                  </BadgeUnlockProvider>
+                  </CollectionsProvider>
                 </ProProvider>
               </WatchPartyProvider>
             </CastProvider>

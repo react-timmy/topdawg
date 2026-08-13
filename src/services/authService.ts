@@ -11,6 +11,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 import auth, { FirebaseAuthTypes, GoogleAuthProvider } from '@react-native-firebase/auth';
 import { GOOGLE_WEB_CLIENT_ID, ENABLE_CLOUD_SYNC } from '../config/env';
+import { clearProFlag } from '../storage/proStatusService';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -26,10 +27,14 @@ const ACCOUNT_KEY = '@filmsort:account';
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function userToAccount(user: FirebaseAuthTypes.User): FilmSortAccount {
+  const email = user.email ?? '';
+  // Prefer the Google display name; fall back to the part before the @ in the email
+  const emailFallback = email.includes('@') ? email.split('@')[0] : email;
+  const displayName = user.displayName ?? emailFallback ?? 'FilmSort User';
   return {
     uid: user.uid,
-    displayName: user.displayName ?? 'FilmSort User',
-    email: user.email ?? '',
+    displayName,
+    email,
     photoUrl: user.photoURL ?? undefined,
   };
 }
@@ -94,12 +99,14 @@ export const authService = {
   async signOut(): Promise<void> {
     if (!ENABLE_CLOUD_SYNC) {
       try { await AsyncStorage.removeItem(ACCOUNT_KEY); } catch { /* ignore */ }
+      try { await clearProFlag(); } catch { /* ignore */ }
       return;
     }
 
     try { await GoogleSignin.signOut(); } catch { /* ignore */ }
     try { await auth().signOut(); } catch { /* ignore */ }
     try { await AsyncStorage.removeItem(ACCOUNT_KEY); } catch { /* ignore */ }
+    try { await clearProFlag(); } catch { /* ignore */ }
   },
 
   /**

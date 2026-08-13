@@ -180,6 +180,11 @@ function mapTV(raw: any): MediaItem {
     genres: raw.genres?.map((g: { name: string }) => g.name) ?? [],
     genre_ids: raw.genre_ids,
     tagline: raw.tagline,
+    seasons: raw.seasons?.map((s: any) => ({
+      seasonNumber: s.season_number,
+      posterUrl: posterUrl(s.poster_path),
+      backdropUrl: backdropUrl(s.poster_path), // TMDB seasons usually only have poster_path, but it can be used for both or just omitted.
+    })) ?? [],
   };
 }
 

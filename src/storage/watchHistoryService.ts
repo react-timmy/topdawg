@@ -61,6 +61,34 @@ export function setOnPosterResolved(
   _onPosterResolved = cb;
 }
 
+/**
+ * Streak-reminder hook — fired after recordCompletion so the notification
+ * service can handle watch events (cancel today's reminder, reschedule tomorrow's).
+ */
+let _onStreakUpdate: (() => void) | null = null;
+
+/**
+ * Register (or deregister) a callback invoked after every successful
+ * recordCompletion write. Used by streak notification service to handle
+ * watch events. Pass null to remove the hook.
+ */
+export function setOnStreakUpdate(
+  cb: (() => void) | null,
+): void {
+  _onStreakUpdate = cb;
+}
+
+/**
+ * General history-change hook — fired after any write to the local history
+ * store (AsyncStorage). Components can register to refresh UI immediately
+ * when history changes locally.
+ */
+let _onHistoryChanged: (() => void) | null = null;
+
+export function setOnHistoryChanged(cb: (() => void) | null): void {
+  _onHistoryChanged = cb;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 async function readAll(): Promise<WatchEvent[]> {
@@ -77,6 +105,19 @@ async function readAll(): Promise<WatchEvent[]> {
 async function writeAll(events: WatchEvent[]): Promise<void> {
   try {
     await AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(events));
+    // Lightweight debug log for smoke-testing — safe to leave in (dev-only noise)
+    try {
+      // Log number of events and most recent id so it's easy to verify writes in device logs
+      // eslint-disable-next-line no-console
+      console.debug(`[WatchHistory] wrote ${events.length} events; newest=${events[0]?.id ?? 'none'}`);
+    } catch (_) {}
+
+    // Notify listeners that local history changed
+    try {
+      if (_onHistoryChanged) _onHistoryChanged();
+    } catch (e) {
+      // swallow listener errors — never fail the write path
+    }
   } catch (err) {
     console.warn('[WatchHistory] write failed', err);
   }
@@ -146,6 +187,11 @@ export const watchHistoryService = {
     // Notify poster-sync layer if this event carries a poster URL
     if (_onPosterResolved && newEvent.posterUrl) {
       _onPosterResolved(newEvent);
+    }
+
+    // Notify streak reminder service that user watched something
+    if (_onStreakUpdate) {
+      _onStreakUpdate();
     }
   },
 

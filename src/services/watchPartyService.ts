@@ -30,9 +30,27 @@ import {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const ROOM_TTL_HOURS = 6;
-const MAX_MEMBERS = 8;
+const MAX_MEMBERS = 15; // Upgraded from 8
 /** How long (ms) without a heartbeat before a member is considered disconnected. */
 export const MEMBER_TIMEOUT_MS = 30_000;
+/** Inactivity timeout: 10 minutes */
+const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
+/** Host disconnect grace period: 5 minutes */
+const HOST_DISCONNECT_GRACE_MS = 5 * 60 * 1000;
+
+// ─── Firestore helpers ────────────────────────────────────────────────────────
+
+/**
+ * Recursively strip keys whose value is `undefined` from a plain object.
+ * Firestore rejects `undefined` as an "unsupported field value"; every
+ * optional field in MediaItem (localFile, localFiles, seasons, posterUrl, …)
+ * must be omitted rather than set to undefined before writing to Firestore.
+ */
+function stripUndefined<T extends object>(obj: T): T {
+  return JSON.parse(JSON.stringify(obj, (_key, value) =>
+    value === undefined ? undefined : value
+  )) as T;
+}
 
 // ─── Collection helpers ───────────────────────────────────────────────────────
 
@@ -50,7 +68,7 @@ function messagesCol(roomId: string) {
 
 // ─── Service ──────────────────────────────────────────────────────────────────
 
-export const watchPartyService = {
+export const watchPartyService: any = {
 
   // ── Create room ────────────────────────────────────────────────────────────
 
@@ -64,6 +82,7 @@ export const watchPartyService = {
     hostPhotoUrl?: string;
     item: MediaItem;
     activeFileUri?: string | null;
+    roomName?: string;
   }): Promise<WatchPartyRoom> {
     const roomId = nanoid(10);
     const now = new Date().toISOString();
@@ -81,18 +100,27 @@ export const watchPartyService = {
       hostUid: params.hostUid,
       hostDisplayName: params.hostDisplayName,
       status: 'lobby',
-      item: params.item,
+      // Strip undefined fields from the item — Firestore rejects undefined values
+      // on optional fields like localFile, localFiles, seasons, posterUrl, etc.
+      item: stripUndefined(params.item),
       activeFileUri: params.activeFileUri ?? null,
       playback: initialPlayback,
       createdAt: now,
       expiresAt,
       memberCount: 1,
+      // roomName may be undefined when the user left it blank — omit it rather
+      // than writing undefined into Firestore.
+      ...(params.roomName ? { roomName: params.roomName } : {}),
+      lastActivityAt: now,
+      hostConnected: true,
+      hostDisconnectedAt: null,
     };
 
     const hostMember: WatchPartyMember = {
       uid: params.hostUid,
       displayName: params.hostDisplayName,
-      photoUrl: params.hostPhotoUrl,
+      // photoUrl may be undefined — omit rather than write undefined.
+      ...(params.hostPhotoUrl ? { photoUrl: params.hostPhotoUrl } : {}),
       role: 'host',
       joinedAt: now,
       isBuffering: false,
@@ -100,8 +128,9 @@ export const watchPartyService = {
     };
 
     const batch = firestore().batch();
-    batch.set(roomDoc(roomId), room);
-    batch.set(membersCol(roomId).doc(params.hostUid), hostMember);
+    // stripUndefined as a final safety net before any Firestore write.
+    batch.set(roomDoc(roomId), stripUndefined(room));
+    batch.set(membersCol(roomId).doc(params.hostUid), stripUndefined(hostMember));
     await batch.commit();
 
     return room;
@@ -151,14 +180,14 @@ export const watchPartyService = {
       const member: WatchPartyMember = {
         uid: params.uid,
         displayName: params.displayName,
-        photoUrl: params.photoUrl,
+        ...(params.photoUrl ? { photoUrl: params.photoUrl } : {}),
         role: 'guest',
         joinedAt: now,
         isBuffering: false,
         lastSeen: now,
       };
 
-      tx.set(memberRef, member);
+      tx.set(memberRef, stripUndefined(member));
       tx.update(ref, { memberCount: firestore.FieldValue.increment(1) });
 
       return room;
@@ -246,11 +275,11 @@ export const watchPartyService = {
       id: nanoid(16),
       uid: params.uid,
       displayName: params.displayName,
-      photoUrl: params.photoUrl,
+      ...(params.photoUrl ? { photoUrl: params.photoUrl } : {}),
       text: params.text.trim(),
       sentAt: new Date().toISOString(),
     };
-    await messagesCol(params.roomId).doc(msg.id).set(msg);
+    await messagesCol(params.roomId).doc(msg.id).set(stripUndefined(msg));
   },
 
   // ── Real-time listeners ───────────────────────────────────────────────────
@@ -306,3 +335,115 @@ export const watchPartyService = {
     return snap.docs.map((d) => d.data() as WatchPartyMember);
   },
 };
+
+// ─── Extended functionality for Watch Party++ ────────────────────────────────
+
+export const watchPartyExtensions = {
+  /**
+   * Fetch all active rooms where the user is a member.
+   * Used for the Party Hub screen to show active parties.
+   */
+  async getUserActiveRooms(uid: string): Promise<WatchPartyRoom[]> {
+    try {
+      // Query rooms where user is a member (need to check members subcollection)
+      // Since Firestore doesn't support cross-collection queries easily,
+      // we'll use a collection group query on members
+      const memberSnap = await firestore()
+        .collectionGroup('members')
+        .where('uid', '==', uid)
+        .get();
+
+      const roomIds = new Set<string>();
+      memberSnap.forEach((doc) => {
+        // Extract roomId from path: watchParties/{roomId}/members/{uid}
+        const pathParts = doc.ref.path.split('/');
+        if (pathParts.length >= 2 && pathParts[0] === 'watchParties') {
+          roomIds.add(pathParts[1]);
+        }
+      });
+
+      if (roomIds.size === 0) return [];
+
+      // Fetch all room documents
+      const rooms: WatchPartyRoom[] = [];
+      for (const roomId of Array.from(roomIds)) {
+        const roomSnap = await firestore().collection('watchParties').doc(roomId).get();
+        if (roomSnap.exists) {
+          const room = roomSnap.data() as WatchPartyRoom;
+          // Only include active rooms (not ended and not expired)
+          if (room.status !== 'ended' && new Date(room.expiresAt) > new Date()) {
+            rooms.push(room);
+          }
+        }
+      }
+
+      // Sort by most recent first
+      return rooms.sort((a, b) => 
+        new Date(b.lastActivityAt || b.createdAt).getTime() - 
+        new Date(a.lastActivityAt || a.createdAt).getTime()
+      );
+    } catch (err) {
+      console.error('Failed to fetch user rooms:', err);
+      return [];
+    }
+  },
+
+  /**
+   * Update room's last activity timestamp.
+   * Called on messages, playback changes, etc.
+   */
+  async updateActivity(roomId: string): Promise<void> {
+    try {
+      await firestore().collection('watchParties').doc(roomId).update({
+        lastActivityAt: new Date().toISOString(),
+      });
+    } catch {
+      // Non-fatal
+    }
+  },
+
+  /**
+   * Update host connection status.
+   * Called when host connects/disconnects.
+   */
+  async updateHostConnection(roomId: string, connected: boolean): Promise<void> {
+    const update: Partial<WatchPartyRoom> = {
+      hostConnected: connected,
+    };
+    
+    if (!connected) {
+      update.hostDisconnectedAt = new Date().toISOString();
+    } else {
+      update.hostDisconnectedAt = null;
+    }
+
+    await firestore().collection('watchParties').doc(roomId).update(update);
+  },
+
+  /**
+   * Check if room should be disbanded due to inactivity or host disconnect.
+   * Returns true if room should end.
+   */
+  shouldDisbandRoom(room: WatchPartyRoom): boolean {
+    const now = Date.now();
+    
+    // Check inactivity timeout (10 minutes)
+    const lastActivity = new Date(room.lastActivityAt || room.createdAt).getTime();
+    if (now - lastActivity > INACTIVITY_TIMEOUT_MS) {
+      return true;
+    }
+
+    // Check host disconnect grace period (5 minutes)
+    if (!room.hostConnected && room.hostDisconnectedAt) {
+      const disconnectTime = new Date(room.hostDisconnectedAt).getTime();
+      if (now - disconnectTime > HOST_DISCONNECT_GRACE_MS) {
+        return true;
+      }
+    }
+
+    return false;
+  },
+};
+
+// Merge extensions into main service
+Object.assign(watchPartyService, watchPartyExtensions);

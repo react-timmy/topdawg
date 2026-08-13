@@ -3,7 +3,8 @@
 export type RootStackParamList = {
   ProfilePicker: undefined;
   MainTabs: undefined;
-  Search: undefined;
+  Scanner: undefined;
+  Search: { onSelect?: (item: MediaItem) => void } | undefined;
   Details: { item: MediaItem };
   Notifications: { initialTab?: 'inbox' | 'upcoming' } | undefined;
   VideoPlayer: { item: MediaItem; startPosition?: number; watchPartyRoomId?: string };
@@ -12,6 +13,13 @@ export type RootStackParamList = {
   Settings: undefined;
   WatchParty: { roomId: string; item: MediaItem };
   JoinWatchParty: undefined;
+  CreateParty: undefined;
+  Collections: undefined;
+  PartyHub: undefined;
+  Profile: undefined;
+  CollectionDetail: { collection: Collection };
+  AddToCollection: { collectionId: string };
+  ShareCollection: { collection: Collection };
 };
 
 
@@ -19,8 +27,9 @@ export type TabParamList = {
   Movies: undefined;
   TV: undefined;
   Library: undefined;
+  Party: undefined;
+  Collections: undefined;
   Profile: undefined;
-  Scan: undefined;
 };
 
 // ─── Media ────────────────────────────────────────────────────────────────────
@@ -48,6 +57,7 @@ export interface MediaItem {
   lastEpisode?: { seasonNumber: number; episodeNumber: number };
   localFile?: LocalFile;
   localFiles?: LocalFile[];
+  seasons?: { seasonNumber: number; posterUrl?: string; backdropUrl?: string }[];
 }
 
 export interface LocalFile {
@@ -245,8 +255,84 @@ export interface WatchPartyRoom {
   createdAt: string;
   /** ISO-8601 — auto-cleaned after this time by a Cloud Function (or client). */
   expiresAt: string;
-  /** Max 8 members */
+  /** Max 15 members (upgraded from 8) */
   memberCount: number;
   /** Countdown start time (ISO-8601) — when status becomes 'countdown' */
   countdownStartedAt?: string;
+  /** Optional room name set by creator */
+  roomName?: string;
+  /** ISO-8601 — last activity timestamp for inactivity timeout */
+  lastActivityAt: string;
+  /** Host connection status for grace period handling */
+  hostConnected: boolean;
+  /** ISO-8601 — when host disconnected (for 5min grace period) */
+  hostDisconnectedAt?: string | null;
+}
+
+// ─── Collections & Lists ──────────────────────────────────────────────────────
+
+/**
+ * CollectionItem — An item in a collection or list.
+ * Can be from the user's library OR verified via quiz from TMDB search.
+ */
+export interface CollectionItem {
+  /** TMDB-style id (e.g., "movie:123" or "tv:456") */
+  id: string;
+  title: string;
+  type: 'movie' | 'tv';
+  posterUrl?: string;
+  backdropUrl?: string;
+  rating?: number;
+  releaseDate?: string;
+  numberOfSeasons?: number;
+  genres?: string[];
+  /** Whether the user verified they watched this via quiz */
+  verified: boolean;
+  /** ISO-8601 — when added to the collection */
+  addedAt: string;
+  /** Optional: if this item is in user's library, reference to local files */
+  hasLocalFile?: boolean;
+}
+
+/**
+ * Collection — User-curated named groups.
+ * Pro users can back up to Firestore via three-dot menu.
+ */
+export interface Collection {
+  id: string; // UUID
+  name: string;
+  /** 'collection' for curated lists, 'list' for temporary utility lists */
+  listType: 'collection' | 'list';
+  items: CollectionItem[];
+  /** ISO-8601 — when the collection was created */
+  createdAt: string;
+  /** ISO-8601 — last modified time */
+  updatedAt: string;
+  /** Pro users can selectively backup collections */
+  backedUp?: boolean;
+}
+
+/**
+ * Lightweight collection metadata for Firestore sync (Pro users only).
+ * Full item details are stored; no need for separate resolution.
+ */
+export interface CollectionCloudEntry {
+  id: string;
+  name: string;
+  listType: 'collection' | 'list';
+  items: CollectionItem[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Quiz question for verifying a user has watched a title.
+ * Generated from TMDB metadata (genre, year, seasons).
+ */
+export interface QuizQuestion {
+  question: string;
+  options: string[];
+  correctIndex: number;
+  mediaId: string;
+  mediaTitle: string;
 }

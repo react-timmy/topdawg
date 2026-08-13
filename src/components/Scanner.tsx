@@ -156,18 +156,6 @@ function CancelButton({ countdown, onCancel }: { countdown: number; onCancel: ()
   );
 }
 
-function BlinkingText({ text }: { text: string }) {
-  const opacity = useSharedValue(1);
-  useEffect(() => {
-    opacity.value = withRepeat(
-      withTiming(0.3, { duration: 1000, easing: Easing.inOut(Easing.ease) }),
-      -1,
-      true,
-    );
-  }, [opacity]);
-  const animatedStyle = useAnimatedStyle(() => ({ opacity: opacity.value }));
-  return <Animated.Text style={[styles.blinkingText, animatedStyle]}>{text}</Animated.Text>;
-}
 
 /** Yield so the UI thread can paint progress between network-heavy steps. */
 function yieldToUI(): Promise<void> {
@@ -220,6 +208,22 @@ export function Scanner({ onScanComplete }: ScannerProps) {
   const [aiEnabled, setAiEnabled] = useState(true);
   const [hasScanned, setHasScanned] = useState(false);
   const [aiToast, setAiToast] = useState<string | null>(null);
+
+  // Pulse animation for the AI icon: when AI is enabled and a scan is running
+  const aiPulse = useSharedValue(1);
+  useEffect(() => {
+    if (aiEnabled && scanState === "scanning") {
+      aiPulse.value = withRepeat(
+        withTiming(1.12, { duration: 700, easing: Easing.inOut(Easing.ease) }),
+        -1,
+        true,
+      );
+    } else {
+      aiPulse.value = withTiming(1, { duration: 180 });
+    }
+  }, [aiEnabled, scanState, aiPulse]);
+  const animatedAiStyle = useAnimatedStyle(() => ({ transform: [{ scale: aiPulse.value }] }));
+
   /** False when OS won't show the permission sheet again — open Settings instead. */
   const [permissionCanAskAgain, setPermissionCanAskAgain] = useState(true);
   const { addNotification } = useNotifications();
@@ -227,10 +231,11 @@ export function Scanner({ onScanComplete }: ScannerProps) {
   const insets = useSafeAreaInsets();
   const scanningRef = useRef(false);
   const cancelRequestedRef = useRef(false);
+  const cancelCountdownRef = useRef<number>(5);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scanStateRef = useRef<ScanState>("idle");
   const handleScanLibraryRef = useRef<() => Promise<void>>(async () => {});
-  const [cancelCountdown, setCancelCountdown] = useState(10);
+  const [cancelCountdown, setCancelCountdown] = useState(5);
 
   type DisambiguationOption = { title: string; year: string; id: string; posterUrl?: string };
   type DisambiguationData = {
@@ -290,11 +295,15 @@ export function Scanner({ onScanComplete }: ScannerProps) {
   // While scanning: 10s window where Cancel is visible, then hide (countdown → 0).
   useEffect(() => {
     if (scanState !== "scanning") {
-      setCancelCountdown(10);
+      cancelCountdownRef.current = 5;
+      setCancelCountdown(5);
       return;
     }
     if (cancelCountdown <= 0) return;
-    const timer = setTimeout(() => setCancelCountdown((c) => c - 1), 1000);
+    const timer = setTimeout(() => {
+      cancelCountdownRef.current = Math.max(0, cancelCountdownRef.current - 1);
+      setCancelCountdown((c) => c - 1);
+    }, 1000);
     return () => clearTimeout(timer);
   }, [scanState, cancelCountdown]);
 
@@ -302,6 +311,7 @@ export function Scanner({ onScanComplete }: ScannerProps) {
     if (cancelRequestedRef.current) return;
     cancelRequestedRef.current = true;
     // Hide button immediately; scan loop will stop at the next safe checkpoint
+    cancelCountdownRef.current = 0;
     setCancelCountdown(0);
     setProgress((prev) => ({
       ...prev,
@@ -475,16 +485,45 @@ export function Scanner({ onScanComplete }: ScannerProps) {
       return;
     }
     scanningRef.current = true;
-    cancelRequestedRef.current = false;
-    setCancelCountdown(10);
+    // If a cancel was requested during permission/picking phase, honor it and abort
+    if (cancelRequestedRef.current) {
+      console.log("[Scanner] Cancel requested before runScan started — aborting");
+      setProgress((prev) => ({ ...prev, phase: "cancelled", currentFile: "" }));
+      setScanState("idle");
+      scanningRef.current = false;
+      // clear flag so future scans are not cancelled immediately
+      cancelRequestedRef.current = false;
+      return;
+    }
+    cancelCountdownRef.current = 5;
+    setCancelCountdown(5);
+    // Mark scanning state so the countdown effect starts decrementing the timer
+    setScanState("scanning");
 
     const matchedItems: MediaItem[] = [];
     const unmatchedFiles: LocalFile[] = [];
+
+    // Wait for the countdown to finish before starting heavy work. If the user
+    // cancels during the countdown nothing should start.
+    while (cancelCountdownRef.current > 0 && !cancelRequestedRef.current) {
+      // small sleep
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, 200));
+    }
+
+    if (cancelRequestedRef.current) {
+      console.log('[Scanner] Cancelled during countdown');
+      setProgress((prev) => ({ ...prev, phase: 'cancelled', currentFile: '' }));
+      setScanState('idle');
+      scanningRef.current = false;
+      // Clear the cancel flag so future scans are not immediately aborted
+      cancelRequestedRef.current = false;
+      return;
+    }
     // Defer inbox spam until the end so we don't re-render the whole app per file
     const pendingNotifications: Parameters<typeof addNotification>[0][] = [];
 
     try {
-      setScanState("scanning");
       setProgress({
         phase: "preparing",
         total: files.length,
@@ -501,6 +540,15 @@ export function Scanner({ onScanComplete }: ScannerProps) {
         InteractionManager.runAfterInteractions(() => resolve());
       });
       await yieldToUI();
+
+      // If user cancelled during the initial countdown / UI paint, abort now
+      if (cancelRequestedRef.current) {
+        console.log("[Scanner] Cancelled before starting heavy work");
+        setProgress((prev) => ({ ...prev, phase: "cancelled", currentFile: "" }));
+        setScanState("idle");
+        scanningRef.current = false;
+        return;
+      }
 
       const currentLibrary = await storageService.getLibrary();
 
@@ -737,19 +785,33 @@ export function Scanner({ onScanComplete }: ScannerProps) {
           return rankSearchResults(results, isAnimeFile)[0];
         };
 
-        /**
-         * Returns true when results contain at least two entries with different
-         * release years AND the filename gave us no year to disambiguate with.
-         * In that case we should ask the user rather than guess.
-         */
         const needsUserClarification = (results: MediaItem[]) => {
-          if (year !== null || results.length < 2) return false;
-          const years = new Set(
-            results
-              .map((r) => r.releaseDate?.split("-")[0])
-              .filter(Boolean),
-          );
-          return years.size >= 2;
+          if (results.length < 2) return false;
+
+          const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+          const searchTitle = normalize(title);
+
+          // Check if multiple results are "relevant" — meaning they either exactly
+          // match the search title OR contain the search title as a substring.
+          // If more than one result is relevant, we have genuine ambiguity and
+          // should ask the user instead of silently picking the top result.
+          const relevantResults = results.filter((r) => {
+            const t = normalize(r.title);
+            return t === searchTitle || t.includes(searchTitle) || searchTitle.includes(t);
+          });
+
+          if (relevantResults.length >= 2) return true;
+
+          // Fallback: multiple results with different release years and no year
+          // hint in the filename → also ambiguous.
+          if (year === null) {
+            const years = new Set(
+              results.map((r) => r.releaseDate?.split("-")[0]).filter(Boolean),
+            );
+            if (years.size >= 2) return true;
+          }
+
+          return false;
         };
 
         const askUser = async (results: MediaItem[]): Promise<string | null> => {
@@ -879,6 +941,12 @@ export function Scanner({ onScanComplete }: ScannerProps) {
         if (!title || hasMetadataLeak(title)) {
           // 1) Dedicated AnimePahe / fansub parser — handles underscore forms
           const local = parseLocalFilename(file.filename);
+          // Debug: log local parser result to help diagnose preview vs dev differences
+          try {
+            console.log('[Scanner][debug] parseLocalFilename', { filename: file.filename, result: local });
+          } catch (e) {
+            /* ignore logging failures */
+          }
           if (local?.title && !hasMetadataLeak(local.title)) {
             title = local.title;
             type = local.type;
@@ -890,7 +958,10 @@ export function Scanner({ onScanComplete }: ScannerProps) {
 
         if (!title || hasMetadataLeak(title)) {
           try {
-            const parsed = filenameParse(file.filename);
+            // Debug: ensure the parser exists and record input
+            try { console.log('[Scanner][debug] filenameParse typeof', typeof filenameParse, { filename: file.filename }); } catch(e){}
+            const parsed = filenameParse ? filenameParse(file.filename) : null;
+            try { console.log('[Scanner][debug] filenameParse result', parsed); } catch(e){}
             if (parsed && parsed.title && !hasMetadataLeak(parsed.title)) {
               title = parsed.title;
               year = parsed.year ? parseInt(parsed.year, 10) : null;
@@ -902,8 +973,9 @@ export function Scanner({ onScanComplete }: ScannerProps) {
                 if (showResult.episodes?.length > 0) episode = showResult.episodes[0];
               }
             }
-          } catch {
-            // @ctrl parser optional
+          } catch (err) {
+            // @ctrl parser optional — surface error for preview diagnostics
+            try { console.warn('[Scanner][warn] filenameParse threw', err); } catch (e) {}
           }
         }
 
@@ -1118,8 +1190,9 @@ export function Scanner({ onScanComplete }: ScannerProps) {
       }
     } finally {
       scanningRef.current = false;
-    }
-  };
+      // Ensure cancel flag is reset after a scan finishes so the next scan starts clean
+      cancelRequestedRef.current = false;
+    };  };
 
   const renderContent = () => {
     switch (scanState) {
@@ -1143,11 +1216,13 @@ export function Scanner({ onScanComplete }: ScannerProps) {
                   pressed && { opacity: 0.75 },
                 ]}
               >
-                <Sparkles
-                  size={18}
-                  color={aiEnabled ? "#4ade80" : "#71717a"}
-                  strokeWidth={2.2}
-                />
+                <Animated.View style={animatedAiStyle}>
+                  <Sparkles
+                    size={18}
+                    color={aiEnabled ? "#4ade80" : "#71717a"}
+                    strokeWidth={2.2}
+                  />
+                </Animated.View>
               </Pressable>
             </View>
 
@@ -1262,11 +1337,6 @@ export function Scanner({ onScanComplete }: ScannerProps) {
               </View>
             </View>
 
-            {aiEnabled ? (
-              <BlinkingText text="AI working…" />
-            ) : (
-              <BlinkingText text="Matching…" />
-            )}
 
             <CancelButton
               countdown={cancelCountdown}

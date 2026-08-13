@@ -9,22 +9,23 @@ import Animated, {
   Easing,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { Film, Tv, BookOpen, ScanLine, User, LucideIcon } from "lucide-react-native";
+import { Film, Tv, BookOpen, User, FolderHeart, LucideIcon } from "lucide-react-native";
 
 import { MoviesScreen } from "../screens/MoviesScreen";
 import { TVScreen } from "../screens/TVScreen";
 import { LibraryScreen } from "../screens/LibraryScreen";
-import { ScannerScreen } from "../screens/ScannerScreen";
 import { ProfileScreen } from "../screens/ProfileScreen";
+import { CollectionsScreen } from "../screens/CollectionsScreen";
+import { ScannerScreen } from "../screens/ScannerScreen";
 
 // ─── Tab config ───────────────────────────────────────────────────────────────
 
 const TAB_CONFIG: Record<string, { icon: LucideIcon; label: string }> = {
-  Movies:  { icon: Film,     label: "Movies"   },
-  TV:      { icon: Tv,       label: "TV Shows" },
-  Library: { icon: BookOpen, label: "Library"  },
-  Profile: { icon: User,     label: "Profile"  },
-  Scan:    { icon: ScanLine, label: "Scan"     },
+  Movies: { icon: Film, label: "Movies" },
+  TV: { icon: Tv, label: "TV Shows" },
+  Collections: { icon: FolderHeart, label: "Collections" },
+  Library: { icon: BookOpen, label: "Library" },
+  Profile: { icon: User, label: "You" },
 };
 
 // ─── Spring config ────────────────────────────────────────────────────────────
@@ -71,7 +72,7 @@ function TabButton({
     <Pressable onPress={onPress} style={styles.tab}>
       <Animated.View style={iconStyle}>
         <Icon
-          size={24}
+          size={27}
           color={isFocused ? "#ffffff" : "#71717a"}
           strokeWidth={isFocused ? 2.5 : 2}
         />
@@ -105,8 +106,34 @@ function CustomTabBar({ state, navigation }: BottomTabBarProps) {
               target: route.key,
               canPreventDefault: true,
             });
-            if (!isFocused && !event.defaultPrevented) {
-              navigation.navigate(route.name as never);
+
+            if (event.defaultPrevented) return;
+
+            // If this TabNavigator is embedded (e.g., ScannerScreen), navigate the
+            // parent navigator so the app's primary tabs switch. Fall back to local
+            // navigation when no parent exists.
+            const parentNav = navigation.getParent?.();
+            if (!isFocused) {
+              if (parentNav) {
+                try {
+                  // If the parent stack exposes the MainTabs screen, navigate to it
+                  // and select the requested child tab there. This anchors embedded
+                  // TabNavigator instances (e.g., in ScannerScreen) to the app's
+                  // primary MainTabs navigator.
+                  const parentState = (parentNav as any).getState?.();
+                  const hasMainTabs = Array.isArray(parentState?.routeNames) && parentState.routeNames.includes('MainTabs');
+                  if (hasMainTabs) {
+                    parentNav.navigate('MainTabs' as never, { screen: route.name } as never);
+                  } else {
+                    parentNav.navigate(route.name as never);
+                  }
+                } catch (e) {
+                  // Fallback to local navigation if parent navigation fails
+                  navigation.navigate(route.name as never);
+                }
+              } else {
+                navigation.navigate(route.name as never);
+              }
             }
           };
 
@@ -141,9 +168,9 @@ export function TabNavigator() {
     >
       <Tab.Screen name="Movies"  component={MoviesScreen} />
       <Tab.Screen name="TV"      component={TVScreen} />
+      <Tab.Screen name="Collections" component={CollectionsScreen} />
       <Tab.Screen name="Library" component={LibraryScreen} />
       <Tab.Screen name="Profile" component={ProfileScreen} />
-      <Tab.Screen name="Scan"    component={ScannerScreen} />
     </Tab.Navigator>
   );
 }
@@ -159,17 +186,18 @@ const styles = StyleSheet.create({
   tabBarContainer: {
     flexDirection: "row",
     backgroundColor: "#141414",
-    paddingTop: 10,
+    paddingTop: 12,
+    paddingBottom: 2,
   },
   tab: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    gap: 3,
-    paddingBottom: 2,
+    gap: 4,
+    paddingBottom: 3,
   },
   tabLabel: {
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: "600",
     letterSpacing: 0.2,
     color: "#71717a",

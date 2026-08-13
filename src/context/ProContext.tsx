@@ -4,6 +4,8 @@
  * Provides Pro status and monthly scan usage to any component in the tree.
  * Call `refreshPro()` after unlocking Pro to propagate the change.
  *
+ * Also manages Pro-exclusive streak reminder notifications.
+ *
  * Usage:
  *   const { isPro, scansUsed, scansRemaining, refreshPro } = usePro();
  */
@@ -20,6 +22,10 @@ import {
   getScansUsedThisMonth,
   isProUser,
 } from '../storage/proStatusService';
+import { setOnStreakUpdate, watchHistoryService } from '../storage/watchHistoryService';
+import { cancelStreakReminders } from '../services/streakNotificationService';
+import { computeStats } from '../utils/statsEngine';
+import { authService } from '../services/authService';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -62,7 +68,32 @@ export function ProProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     refreshPro();
+
+    // Keep Pro status in sync with auth state — when a user signs out the
+    // device's Pro flag should be cleared (authService.signOut clears it) and
+    // this refresh ensures the UI updates immediately.
+    const unsub = authService.onAuthStateChanged(() => {
+      void refreshPro();
+    });
+
+    return () => unsub();
   }, [refreshPro]);
+
+  // ── Register streak reminder watch hook ───────────────────────────────────
+  // Note: Streak reminders are available to all users, not just Pro
+  useEffect(() => {
+    // Register hook to cancel reminders when user watches something
+    const handleWatch = async () => {
+      // Cancel today's reminder since user watched
+      void cancelStreakReminders();
+    };
+
+    setOnStreakUpdate(handleWatch);
+
+    return () => {
+      setOnStreakUpdate(null);
+    };
+  }, []);
 
   const scansRemaining = isPro
     ? FREE_SCAN_LIMIT

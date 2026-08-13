@@ -129,6 +129,47 @@ export async function proxyFetch<T>(
 }
 
 /**
+ * publicProxyFetch: Unauthenticated proxy fetch for public TMDB data.
+ *
+ * This posts to the Cloudflare Worker at /tmdb/public and does NOT attach
+ * an Authorization header. The Worker must expose a corresponding public
+ * route that forwards requests to TMDB without requiring an ID token.
+ *
+ * Use this only for non-user-specific read-only TMDB endpoints (e.g.
+ * /trending, /discover). The server-side worker must enforce rate limits.
+ */
+export async function proxyFetchPublic<T>(
+  endpoint: ProxyEndpoint,
+  body: Record<string, unknown>,
+): Promise<T> {
+  if (!PROXY_BASE_URL) {
+    throw new ProxyError(
+      503,
+      'PROXY_BASE_URL is not set. Deploy the Cloudflare Worker and set EXPO_PUBLIC_PROXY_BASE_URL in .env',
+    );
+  }
+
+  // Endpoint will be "tmdb" for public TMDB calls. Worker should expose
+  // a matching /tmdb/public route.
+  const url = `${PROXY_BASE_URL}/${endpoint}/public`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => `HTTP ${res.status}`);
+    throw new ProxyError(res.status, text);
+  }
+
+  return res.json() as Promise<T>;
+}
+
+/**
  * Returns true when a user is currently signed in and the proxy can be used.
  * Use this before making proxy requests if you want a graceful no-op fallback.
  */

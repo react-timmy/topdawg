@@ -72,7 +72,6 @@ import {
 import { RootStackParamList, MediaItem, LocalFile } from '../types';
 import { watchProgressService, COMPLETED_FRACTION } from '../storage/watchProgressService';
 import { watchHistoryService } from '../storage/watchHistoryService';
-import { useBadgeUnlock } from '../context/BadgeUnlockContext';
 import { useSubtitles } from '../hooks/useSubtitles';
 import { SubtitleOverlay, SubtitleStyleConfig, SubtitleFontWeight, SubtitleBgOpacity } from '../components/SubtitleOverlay';
 import { searchSubtitles, downloadSubtitleCues, SUBTITLE_LANGUAGES, SubtitleHit } from '../services/subtitleSearchService';
@@ -142,16 +141,24 @@ function SkipIcon({ direction }: { direction: 'back' | 'forward' }) {
 
 function CountdownOverlay({ startedAt, onComplete }: { startedAt: string; onComplete: () => void }) {
   const [count, setCount] = useState(3);
+  // Track whether onComplete has already fired so we never call it twice.
+  const completedRef = useRef(false);
+  // Keep a stable ref to onComplete so the interval closure always sees the
+  // latest callback without needing to re-register the interval.
+  const onCompleteRef = useRef(onComplete);
+  useEffect(() => { onCompleteRef.current = onComplete; }, [onComplete]);
+
   const scale = useSharedValue(0.5);
   const opacity = useSharedValue(1);
 
   useEffect(() => {
+    completedRef.current = false;
     const startTime = new Date(startedAt).getTime();
     const elapsed = Date.now() - startTime;
     const remaining = 3000 - elapsed;
 
     if (remaining <= 0) {
-      onComplete();
+      setCount(0);
       return;
     }
 
@@ -160,10 +167,10 @@ function CountdownOverlay({ startedAt, onComplete }: { startedAt: string; onComp
     setCount(initialCount);
 
     const interval = setInterval(() => {
+      // Pure state transition — never call side-effects inside an updater.
       setCount((prev) => {
         if (prev <= 1) {
           clearInterval(interval);
-          onComplete();
           return 0;
         }
         return prev - 1;
@@ -171,7 +178,15 @@ function CountdownOverlay({ startedAt, onComplete }: { startedAt: string; onComp
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [startedAt, onComplete]);
+  }, [startedAt]);
+
+  // Fire onComplete exactly once when the count reaches 0, outside of render.
+  useEffect(() => {
+    if (count === 0 && !completedRef.current) {
+      completedRef.current = true;
+      onCompleteRef.current();
+    }
+  }, [count]);
 
   useEffect(() => {
     if (count === 0) return;
@@ -276,7 +291,6 @@ export function VideoPlayerScreen() {
   const { width: windowW, height: windowH } = useWindowDimensions();
   // Compact right sheet — wide enough for episode cards, not a half-screen slab
   const episodesPanelW = Math.min(300, Math.max(280, Math.round(windowW * 0.32)));
-  const { checkForNewBadges } = useBadgeUnlock();
 
   const [item, setItem] = useState<MediaItem>(initialItem);
   const activeFile = item.localFile;
@@ -312,7 +326,6 @@ export function VideoPlayerScreen() {
   // Default: the season of the currently playing episode, else first season
   const defaultSeason = activeFile?.seasonNumber ?? seasonNumbers[0] ?? null;
   const [selectedSeason, setSelectedSeason] = useState<number | null>(defaultSeason);
-  const [seasonDropdownOpen, setSeasonDropdownOpen] = useState(false);
 
   // Track completed episodes
   const [completedEpisodes, setCompletedEpisodes] = useState<Set<string>>(new Set());
@@ -465,6 +478,8 @@ export function VideoPlayerScreen() {
   const audioOpenRef = useRef(false); // keeping ref for auto-hide guard compatibility
   useEffect(() => { episodesOpenRef.current = episodesOpen; }, [episodesOpen]);
 
+  const [seasonDropdownOpen, setSeasonDropdownOpen] = useState(false);
+
   // ── Subtitle persistence ──────────────────────────────────────────────────
   // Auto-load: when the active file changes, check if we have a saved SRT for it
   useEffect(() => {
@@ -516,7 +531,6 @@ export function VideoPlayerScreen() {
   useEffect(() => {
     if (!episodesOpen) return;
     setSelectedSeason(activeFile?.seasonNumber ?? seasonNumbers[0] ?? null);
-    setSeasonDropdownOpen(false);
   }, [episodesOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Scroll to the active episode after the panel slide-in finishes (340ms)
@@ -641,15 +655,39 @@ export function VideoPlayerScreen() {
   useEffect(() => {
     if (!player) return;
     const sub = player.addListener('statusChange', ({ status }) => {
-      if (status === 'readyToPlay' && autoPlayNextEp.current) {
+      if (status !== 'readyToPlay') return;
+
+      // Guest in a watch party: always apply host sync on ready, regardless of
+      // whether this was an auto-play load or a manual navigation.  The old
+      // guard (autoPlayNextEp.current) meant that if the player was already
+      // loaded when the guest opened the screen the host state was never applied.
+      if (watchPartyRoomId && !party.isHost) {
+        autoPlayNextEp.current = false;
+        const hostPlayback = party.room?.playback;
+        if (hostPlayback) {
+          const latencyS = (Date.now() - new Date(hostPlayback.updatedAt).getTime()) / 1000;
+          const targetPos = hostPlayback.isPlaying
+            ? hostPlayback.positionSeconds + latencyS
+            : hostPlayback.positionSeconds;
+          try { player.currentTime = Math.max(0, targetPos); } catch { /* ignore */ }
+          if (hostPlayback.isPlaying) { player.play(); setIsPlaying(true); }
+        }
+        // No host state yet (still in lobby) — leave paused; context sync will
+        // apply the state once the host starts playing.
+        return;
+      }
+
+      // Non-party path: only auto-play when a source change requested it.
+      // This prevents spurious readyToPlay events (e.g. after a seek) from
+      // force-playing while the user has intentionally paused.
+      if (autoPlayNextEp.current) {
         autoPlayNextEp.current = false;
         player.play();
         setIsPlaying(true);
       }
     });
     return () => sub.remove();
-   
-  }, [player]);
+  }, [player, watchPartyRoomId, party.isHost, party.room?.playback]);
 
   // ── Resume from saved position ─────────────────────────────────────────────
   useEffect(() => {
@@ -768,7 +806,7 @@ export function VideoPlayerScreen() {
           posterUrl: item.posterUrl,
           seasonNumber: activeFile.seasonNumber,
           episodeNumber: activeFile.episodeNumber,
-        }).then(() => watchHistoryService.getHistory()).then(checkForNewBadges);
+        }).then(() => watchHistoryService.getHistory());
       }
     }, TICK_MS);
     return () => {
@@ -858,8 +896,12 @@ export function VideoPlayerScreen() {
   }, [player]);
 
   // ── Watch Party: auto-join room if navigated here from WatchPartyScreen ───
+  // Guard on both isInParty AND isLoading: WatchPartyScreen may have already
+  // called joinParty and the async result is still in-flight when this screen
+  // mounts. Without the isLoading guard a second joinParty call races with the
+  // first, causing two Firestore listeners and a play/pause flicker loop.
   useEffect(() => {
-    if (!watchPartyRoomId || party.isInParty) return;
+    if (!watchPartyRoomId || party.isInParty || party.isLoading) return;
     
     // Check if we have a playable file
     if (!activeFile?.uri) {
@@ -873,7 +915,7 @@ export function VideoPlayerScreen() {
     
     party.joinParty(watchPartyRoomId, initialItem).catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [watchPartyRoomId]);
+  }, [watchPartyRoomId, party.isInParty, party.isLoading]);
 
   // ── Watch Party: Handle countdown and sync ────────────────────────────────
   useEffect(() => {
@@ -1110,8 +1152,12 @@ export function VideoPlayerScreen() {
   // ── Handlers ──────────────────────────────────────────────────────────────
 
   const handleBack = () => {
-    // beforeRemove listener handles progress save, player pause, and portrait lock
-    navigation.goBack();
+    // beforeRemove listener handles progress save, player pause, and portrait lock.
+    // Guard with canGoBack() — if the player was launched as the initial route
+    // (e.g. from a deep-link) there is nothing to pop and GO_BACK would crash.
+    if (navigation.canGoBack()) {
+      navigation.goBack();
+    }
   };
 
   const handleSeekComplete = (value: number) => {
@@ -1199,7 +1245,7 @@ export function VideoPlayerScreen() {
       {/* Video layer — zIndex 0 */}
       <Animated.View style={[styles.videoWrap, videoPinchStyle]}>
         <VideoView
-          style={styles.video}
+          style={[styles.video, (episodesOpen || subtitleOpen) && { opacity: 0.45 }]}
           player={player}
           allowsFullscreen={false}
           allowsPictureInPicture
@@ -1422,18 +1468,25 @@ export function VideoPlayerScreen() {
         onRequestClose={() => setEpisodesOpen(false)}
         statusBarTranslucent
       >
-        <View style={styles.sideModalRoot}>
+        <View style={[styles.sideModalRoot, { justifyContent: 'flex-end' }]}>
           <Pressable style={styles.sideBackdrop} onPress={() => { setEpisodesOpen(false); if (player?.playing) scheduleHide(); }} />
           <Animated.View
-            entering={SlideInRight.duration(280)}
-            exiting={SlideOutRight.duration(220)}
-            style={[styles.sidePanel, { width: episodesPanelW }]}
+            entering={FadeIn.duration(200)}
+            exiting={FadeOut.duration(200)}
+            style={[
+              styles.sidePanel,
+              {
+                width: episodesPanelW,
+                marginTop: Math.max(insets.top, 16),
+                marginBottom: Math.max(insets.bottom, 16),
+                marginRight: Math.max(insets.right, 16),
+              }
+            ]}
           >
-            {/* Header — elevated so season dropdown paints above episode list */}
-            <View style={[styles.panelHeaderWrap, { paddingTop: Math.max(insets.top, 16) }]}>
-              <BlurView intensity={60} tint="dark" style={StyleSheet.absoluteFillObject} />
+            <BlurView intensity={75} tint="dark" style={StyleSheet.absoluteFillObject} />
 
-              {/* Title row + close */}
+            {/* Header — elevated so season dropdown paints above episode list */}
+            <View style={styles.panelHeaderWrap}>
               <View style={styles.panelHeaderInner}>
                 <View style={styles.panelHeaderText}>
                   <Text style={styles.panelTitle}>Episodes</Text>
@@ -1443,7 +1496,7 @@ export function VideoPlayerScreen() {
                 </View>
 
                 <Pressable
-                  onPress={() => { setEpisodesOpen(false); setSeasonDropdownOpen(false); if (player?.playing) scheduleHide(); }}
+                  onPress={() => { setEpisodesOpen(false); if (player?.playing) scheduleHide(); }}
                   style={styles.panelCloseBtn}
                   hitSlop={10}
                 >
@@ -1451,62 +1504,44 @@ export function VideoPlayerScreen() {
                 </Pressable>
               </View>
 
-              {/* Season picker — own row so dropdown can float over the list */}
+              {/* Season picker — horizontal scroll of pills */}
               {seasonNumbers.length > 1 && (
                 <View style={styles.seasonPillWrap}>
-                  <Pressable
-                    style={[styles.seasonPill, seasonDropdownOpen && styles.seasonPillOpen]}
-                    onPress={() => setSeasonDropdownOpen((v) => !v)}
-                    hitSlop={8}
+                  <ScrollView
+                    horizontal={true}
+                    showsHorizontalScrollIndicator={false}
+                    scrollEventThrottle={16}
+                    contentContainerStyle={styles.seasonPillScrollContent}
+                    style={styles.seasonPillScroll}
                   >
-                    <Text style={styles.seasonPillText}>
-                      {selectedSeason !== null ? `Season ${selectedSeason}` : 'All seasons'}
-                    </Text>
-                    <ChevronDown
-                      size={13}
-                      color={seasonDropdownOpen ? '#ffffff' : '#a1a1aa'}
-                      strokeWidth={2.5}
-                      style={{ transform: [{ rotate: seasonDropdownOpen ? '180deg' : '0deg' }] }}
-                    />
-                  </Pressable>
-
-                  {seasonDropdownOpen && (
-                    <Animated.View entering={FadeIn.duration(140)} style={styles.seasonDropdownList}>
-                      {seasonNumbers.map((s) => {
-                        const isActive = s === selectedSeason;
-                        const epCount = episodes.filter((e) => e.seasonNumber === s).length;
-                        return (
-                          <Pressable
-                            key={s}
-                            style={({ pressed }) => [
-                              styles.seasonDropdownItem,
-                              isActive && styles.seasonDropdownItemActive,
-                              pressed && { opacity: 0.75 },
-                            ]}
-                            onPress={() => {
-                              setSelectedSeason(s);
-                              setSeasonDropdownOpen(false);
-                            }}
-                          >
-                            <View style={styles.seasonDropdownItemLeft}>
-                              {isActive && <View style={styles.seasonDropdownActiveDot} />}
-                              <Text
-                                style={[
-                                  styles.seasonDropdownItemText,
-                                  isActive && styles.seasonDropdownItemTextActive,
-                                ]}
-                              >
-                                Season {s}
-                              </Text>
-                            </View>
-                            <Text style={styles.seasonDropdownItemCount}>
-                              {epCount} ep{epCount !== 1 ? 's' : ''}
-                            </Text>
-                          </Pressable>
-                        );
-                      })}
-                    </Animated.View>
-                  )}
+                    {seasonNumbers.map((s) => {
+                      const isActive = s === selectedSeason;
+                      const epCount = episodes.filter((e) => e.seasonNumber === s).length;
+                      return (
+                        <Pressable
+                          key={s}
+                          style={[
+                            styles.seasonPill,
+                            isActive && styles.seasonPillActive,
+                          ]}
+                          onPress={() => setSelectedSeason(s)}
+                        >
+                          <Text style={[
+                            styles.seasonPillText,
+                            isActive && styles.seasonPillTextActive,
+                          ]}>
+                            Season {s}
+                          </Text>
+                          <Text style={[
+                            styles.seasonPillEpCount,
+                            isActive && styles.seasonPillEpCountActive,
+                          ]}>
+                            {epCount} ep{epCount !== 1 ? 's' : ''}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
                 </View>
               )}
 
@@ -1593,16 +1628,24 @@ export function VideoPlayerScreen() {
         onRequestClose={() => { setSubtitleOpen(false); if (player?.playing) scheduleHide(); }}
         statusBarTranslucent
       >
-        <View style={styles.sideModalRoot}>
+        <View style={[styles.sideModalRoot, { justifyContent: 'flex-end' }]}>
           <Pressable style={styles.sideBackdrop} onPress={() => { setSubtitleOpen(false); setSubLangPickerOpen(false); if (player?.playing) scheduleHide(); }} />
           <Animated.View
-            entering={SlideInRight.duration(280)}
-            exiting={SlideOutRight.duration(220)}
-            style={[styles.sidePanel, { width: Math.min(320, Math.max(300, Math.round(episodesPanelW * 1.05))) }]}
+            entering={FadeIn.duration(200)}
+            exiting={FadeOut.duration(200)}
+            style={[
+              styles.sidePanel,
+              {
+                width: Math.min(320, Math.max(300, Math.round(episodesPanelW * 1.05))),
+                marginTop: Math.max(insets.top, 16),
+                marginBottom: Math.max(insets.bottom, 16),
+                marginRight: Math.max(insets.right, 16),
+              }
+            ]}
           >
+            <BlurView intensity={75} tint="dark" style={StyleSheet.absoluteFillObject} />
             {/* ── Header ── */}
-            <View style={[styles.panelHeaderWrap, { paddingTop: Math.max(insets.top, 16) }]}>
-              <BlurView intensity={60} tint="dark" style={StyleSheet.absoluteFillObject} />
+            <View style={styles.panelHeaderWrap}>
               <View style={styles.panelHeaderInner}>
                 <View style={styles.panelHeaderText}>
                   <Text style={styles.panelTitle}>Subtitles</Text>
@@ -1727,6 +1770,27 @@ export function VideoPlayerScreen() {
                     />
                   </View>
 
+                  {/* Vertical position drag */}
+                  <Text style={[styles.audioSectionLabel, { marginTop: 20 }]}>Vertical Position</Text>
+                  <View style={styles.subStyleRow}>
+                    <Text style={styles.subStyleValueLabel}>{subBottomOffset}px</Text>
+                    <Slider
+                      style={{ flex: 1, height: 36 }}
+                      minimumValue={5}
+                      maximumValue={Math.round(windowH * 0.79)}
+                      step={4}
+                      value={subBottomOffset}
+                      onValueChange={(v) => setSubBottomOffset(Math.round(v))}
+                      minimumTrackTintColor={NF_RED}
+                      maximumTrackTintColor="rgba(255,255,255,0.18)"
+                      thumbTintColor="#ffffff"
+                    />
+                  </View>
+                  <View style={styles.subPositionHint}>
+                    <MoveVertical size={14} color="#52525b" strokeWidth={1.8} />
+                    <Text style={styles.subPositionHintText}>Drag the slider to position subtitles anywhere on screen</Text>
+                  </View>
+
                   {/* Font weight */}
                   <Text style={[styles.audioSectionLabel, { marginTop: 20 }]}>Font Weight</Text>
                   <View style={styles.subWeightGrid}>
@@ -1759,27 +1823,6 @@ export function VideoPlayerScreen() {
                         <Text style={[styles.subWeightTileText, subStyle.bgOpacity === v && styles.subWeightTileTextActive]}>{label}</Text>
                       </Pressable>
                     ))}
-                  </View>
-
-                  {/* Vertical position drag */}
-                  <Text style={[styles.audioSectionLabel, { marginTop: 20 }]}>Vertical Position</Text>
-                  <View style={styles.subStyleRow}>
-                    <Text style={styles.subStyleValueLabel}>{subBottomOffset}px</Text>
-                    <Slider
-                      style={{ flex: 1, height: 36 }}
-                      minimumValue={5}
-                      maximumValue={Math.round(windowH * 0.79)}
-                      step={4}
-                      value={subBottomOffset}
-                      onValueChange={(v) => setSubBottomOffset(Math.round(v))}
-                      minimumTrackTintColor={NF_RED}
-                      maximumTrackTintColor="rgba(255,255,255,0.18)"
-                      thumbTintColor="#ffffff"
-                    />
-                  </View>
-                  <View style={styles.subPositionHint}>
-                    <MoveVertical size={14} color="#52525b" strokeWidth={1.8} />
-                    <Text style={styles.subPositionHintText}>Drag the slider to position subtitles anywhere on screen</Text>
                   </View>
 
                   {/* Live preview pill */}
@@ -1946,7 +1989,7 @@ export function VideoPlayerScreen() {
           pointerEvents="none"
         >
           <Lock size={16} color={NF_RED} strokeWidth={2.5} />
-          <Text style={styles.lockHintText}>Controls locked · tap lock to unlock</Text>
+          <Text style={styles.lockHintText}>Tap lock to unlock</Text>
         </Animated.View>
       )}
 
@@ -2119,29 +2162,28 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
   },
-  sideBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)' },
+  sideBackdrop: { flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.5)' },
   sidePanel: {
-    // Width comes from inline style (episodesPanelW). Stretch full height only —
-    // do not use flex:1 on the main axis or the sheet grows too wide.
     alignSelf: 'stretch',
     maxWidth: 300,
-    backgroundColor: '#0d0d0f',
-    borderLeftWidth: 1,
-    borderLeftColor: 'rgba(255,255,255,0.07)',
+    backgroundColor: 'rgba(0, 0, 0, 0.45)', // glassmorphic translucent base
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
     paddingLeft: 0,
     shadowColor: '#000',
-    shadowOpacity: 0.55,
-    shadowRadius: 24,
-    shadowOffset: { width: -6, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 32,
+    shadowOffset: { width: -8, height: 8 },
     elevation: 20,
-    // visible so season menu can overlap the list; list still clips its own content
-    overflow: 'visible',
+    overflow: 'hidden', // clips the blur view nicely to the rounded corners
   },
 
   // Panel header — above the episode list (zIndex) so the season menu floats on top
   panelHeaderWrap: {
-    paddingHorizontal: 14,
-    paddingBottom: 12,
+    paddingHorizontal: 16,
+    paddingTop: 20,
+    paddingBottom: 14,
     overflow: 'visible',
     borderBottomWidth: 0,
     zIndex: 40,
@@ -2151,7 +2193,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-start',
     justifyContent: 'space-between',
-    gap: 10,
+    gap: 12,
   },
   panelHeaderText: { flex: 1, gap: 3, minWidth: 0 },
   panelTitle: {
@@ -2188,17 +2230,21 @@ const styles = StyleSheet.create({
 
   // ── Episode cards (matches DetailsScreen EpisodeCard style) ───────────────
   epCard: {
-    borderRadius: 14,
+    borderRadius: 16,
     overflow: 'hidden',
-    backgroundColor: '#111113',
-    borderTopWidth: 1,
-    borderLeftWidth: 1,
-    borderColor: 'rgba(255,255,255,0.07)',
-    marginBottom: 8,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
+    marginBottom: 10,
   },
   epCardActive: {
-    borderColor: `rgba(229,9,20,0.35)`,
-    backgroundColor: 'rgba(229,9,20,0.06)',
+    borderColor: 'rgba(229,9,20,0.4)',
+    backgroundColor: 'rgba(229,9,20,0.12)',
+    shadowColor: '#E50914',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 4,
   },
   epCardBg: {
     ...StyleSheet.absoluteFillObject,
@@ -2255,9 +2301,9 @@ const styles = StyleSheet.create({
   audioOptionRow: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
     paddingVertical: 12, paddingHorizontal: 12,
-    borderRadius: 12, marginBottom: 6,
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 14, marginBottom: 8,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)',
   },
   audioOptionIcon: {
     width: 30, height: 30, borderRadius: 8,
@@ -2295,12 +2341,12 @@ const styles = StyleSheet.create({
     flex: 1, alignItems: 'center', justifyContent: 'center',
     gap: 5, paddingVertical: 12, borderRadius: 12,
     overflow: 'hidden',
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)',
   },
   speedTileActive: {
-    backgroundColor: '#ffffff',
-    borderColor: '#ffffff',
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderColor: 'rgba(255,255,255,0.3)',
   },
   speedTileText: { color: '#71717a', fontSize: 12, fontWeight: '800' },
   speedTileTextActive: { color: '#000000' },
@@ -2308,89 +2354,51 @@ const styles = StyleSheet.create({
   // ── Season picker (pill + dropdown) ───────────────────────────────────────
   // Own row under the title; menu is absolute and elevated above the episode list.
   seasonPillWrap: {
-    position: 'relative',
-    alignSelf: 'flex-start',
-    marginTop: 10,
-    zIndex: 50,
-    elevation: 50,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  seasonPillScroll: {
+    height: 40,
+  },
+  seasonPillScrollContent: {
+    gap: 8,
+    paddingHorizontal: 0,
   },
   seasonPill: {
-    flexDirection: 'row',
+    flexDirection: 'column',
     alignItems: 'center',
-    gap: 6,
+    justifyContent: 'center',
+    gap: 2,
     paddingHorizontal: 12,
     paddingVertical: 7,
+    minWidth: 50,
     borderRadius: 10,
-    backgroundColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: 'rgba(255,255,255,0.06)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+    borderColor: 'rgba(255,255,255,0.10)',
   },
-  seasonPillOpen: {
-    backgroundColor: 'rgba(229,9,20,0.18)',
-    borderColor: 'rgba(229,9,20,0.55)',
+  seasonPillActive: {
+    backgroundColor: '#e50914',
+    borderColor: '#e50914',
   },
   seasonPillText: {
-    color: '#ffffff',
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 0.15,
-  },
-  seasonDropdownList: {
-    position: 'absolute',
-    top: '100%',
-    left: 0,
-    marginTop: 6,
-    minWidth: 168,
-    maxHeight: 240,
-    backgroundColor: '#141416',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
-    overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOpacity: 0.75,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 48,
-    zIndex: 60,
-  },
-  seasonDropdownItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 12,
-    paddingVertical: 11,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: 'rgba(255,255,255,0.06)',
-  },
-  seasonDropdownItemActive: {
-    backgroundColor: 'rgba(229,9,20,0.12)',
-  },
-  seasonDropdownItemLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  seasonDropdownActiveDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: NF_RED,
-  },
-  seasonDropdownItemText: {
     color: '#a1a1aa',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  seasonDropdownItemTextActive: {
-    color: '#ffffff',
-    fontWeight: '700',
-  },
-  seasonDropdownItemCount: {
-    color: '#52525b',
     fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+  },
+  seasonPillTextActive: {
+    color: '#ffffff',
+    fontWeight: '800',
+  },
+  seasonPillEpCount: {
+    color: '#52525b',
+    fontSize: 9,
     fontWeight: '600',
     fontVariant: ['tabular-nums'],
+  },
+  seasonPillEpCountActive: {
+    color: 'rgba(255,255,255,0.85)',
   },
 
   // ── Subtitle panel ────────────────────────────────────────────────────────
@@ -2402,15 +2410,15 @@ const styles = StyleSheet.create({
   subTab: {
     flex: 1,
     alignItems: 'center',
-    paddingVertical: 7,
-    borderRadius: 8,
-    backgroundColor: 'rgba(255,255,255,0.05)',
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.04)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.07)',
+    borderColor: 'rgba(255,255,255,0.06)',
   },
   subTabActive: {
     backgroundColor: 'rgba(229,9,20,0.15)',
-    borderColor: 'rgba(229,9,20,0.4)',
+    borderColor: 'rgba(229,9,20,0.35)',
   },
   subTabText: {
     color: '#71717a',
@@ -2445,22 +2453,29 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 11,
-    borderRadius: 10,
-    backgroundColor: 'rgba(255,255,255,0.05)',
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.04)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
+    borderColor: 'rgba(255,255,255,0.06)',
   },
   subWeightTileActive: {
-    backgroundColor: '#ffffff',
-    borderColor: '#ffffff',
+    backgroundColor: 'rgba(229,9,20,0.15)',
+    borderColor: 'rgba(229,9,20,0.3)',
+    shadowColor: '#E50914',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 2,
   },
   subWeightTileText: {
     color: '#71717a',
     fontSize: 12,
+    fontWeight: '600',
   },
   subWeightTileTextActive: {
-    color: '#000000',
+    color: '#ffffff',
+    fontWeight: '700',
   },
   subPositionHint: {
     flexDirection: 'row',
@@ -2536,6 +2551,13 @@ const styles = StyleSheet.create({
   },
   subLangItemActive: {
     backgroundColor: 'rgba(229,9,20,0.10)',
+  },
+  seasonDropdownActiveDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#34d399',
+    marginRight: 8,
   },
   subLangItemText: {
     color: '#a1a1aa',

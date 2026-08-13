@@ -78,13 +78,19 @@ export const profileService = {
 
   /**
    * Save (full or partial) profile updates.
+   * Stamps the record with the current time so syncProfile() can do a real
+   * last-write-wins comparison against the Firestore updatedAt.
    * Fires the setOnProfileSaved hook after a successful write so AccountProvider
    * can push the update to Firestore.
    */
   async save(updates: Partial<LocalProfile>): Promise<void> {
     try {
       const current = await profileService.get();
-      const next: LocalProfile = { ...current, ...updates };
+      const next: LocalProfile & { updatedAt: string } = {
+        ...current,
+        ...updates,
+        updatedAt: new Date().toISOString(),
+      };
       await AsyncStorage.setItem(PROFILE_KEY, JSON.stringify(next));
       _onProfileSaved?.(next);
     } catch {
