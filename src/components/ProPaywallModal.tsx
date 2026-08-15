@@ -200,13 +200,14 @@ export function ProPaywallModal({
   };
 
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="slide"
-      statusBarTranslucent
-      onRequestClose={onClose}
-    >
+    <>
+      <Modal
+        visible={visible && !codeModalOpen}
+        transparent
+        animationType="slide"
+        statusBarTranslucent
+        onRequestClose={onClose}
+      >
       <View style={styles.backdrop}>
         <View style={[styles.sheet, { paddingBottom: insets.bottom + 20 }]}>
           <View style={styles.handle} />
@@ -309,12 +310,13 @@ export function ProPaywallModal({
           </Pressable>
         </View>
       </View>
+      </Modal>
       <ProCodeModal
         visible={codeModalOpen}
         onClose={() => setCodeModalOpen(false)}
         onSuccess={handleCodeSuccess}
       />
-    </Modal>
+    </>
   );
 }
 
@@ -328,8 +330,6 @@ const styles = StyleSheet.create({
   },
   sheet: {
     backgroundColor: '#111113',
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.1)',
     borderBottomWidth: 0,

@@ -25,9 +25,12 @@ const AppTheme = {
 };
 
 export default function App() {
-  // ── Notifications ──────────────────────────────────────────────────────────
+  // ── Notifications & System Bar ──────────────────────────────────────────────────────────
   useEffect(() => {
     const unsub = setupNotificationTapHandler();
+    import('expo-navigation-bar').then(NavigationBar => {
+      NavigationBar.setBackgroundColorAsync('#0a0a0a').catch(() => {});
+    }).catch(() => {});
     return unsub;
   }, []);
 
@@ -45,19 +48,42 @@ export default function App() {
                       NavigationContainer handles our routing.
                       We no longer reset navigation on resume, so users stay where they were unless they cold-boot the app.
                     */}
-                    <NavigationContainer
-                      ref={navigationRef}
-                      theme={AppTheme}
-                    >
-                      <RootNavigator />
-                    </NavigationContainer>
-                  </CollectionsProvider>
-                </ProProvider>
-              </WatchPartyProvider>
-            </CastProvider>
-          </AccountProvider>
-        </NotificationProvider>
-      </SafeAreaProvider>
-    </GestureHandlerRootView>
-  );
-}
+                      <NavigationContainer
+                        ref={navigationRef}
+                        theme={AppTheme}
+                      >
+                        <RootNavigator />
+                      </NavigationContainer>
+                      <NavigationBarBackground />
+                    </CollectionsProvider>
+                  </ProProvider>
+                </WatchPartyProvider>
+              </CastProvider>
+            </AccountProvider>
+          </NotificationProvider>
+        </SafeAreaProvider>
+      </GestureHandlerRootView>
+    );
+  }
+
+  import { useSafeAreaInsets } from "react-native-safe-area-context";
+  import { View } from "react-native";
+
+  function NavigationBarBackground() {
+    const insets = useSafeAreaInsets();
+    if (insets.bottom === 0) return null;
+    return (
+      <View
+        pointerEvents="none"
+        style={{
+          position: "absolute",
+          bottom: 0,
+          left: 0,
+          right: 0,
+          height: insets.bottom,
+          backgroundColor: "#0a0a0a",
+          zIndex: 9999,
+        }}
+      />
+    );
+  }

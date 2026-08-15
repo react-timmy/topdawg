@@ -317,14 +317,23 @@ export function VideoPlayerScreen() {
   // ── Season list (derived from all episodes) ───────────────────────────────
   const seasonNumbers = useMemo(() => {
     const nums = new Set<number>();
+    let hasNull = false;
     for (const ep of episodes) {
-      if (ep.seasonNumber != null) nums.add(ep.seasonNumber);
+      if (ep.seasonNumber != null) {
+        nums.add(ep.seasonNumber);
+      } else {
+        hasNull = true;
+      }
     }
-    return [...nums].sort((a, b) => a - b);
+    const arr = [...nums].sort((a, b) => a - b);
+    if (hasNull && arr.length > 0) {
+      arr.unshift(0); // 0 acts as 'Extras'
+    }
+    return arr;
   }, [episodes]);
 
   // Default: the season of the currently playing episode, else first season
-  const defaultSeason = activeFile?.seasonNumber ?? seasonNumbers[0] ?? null;
+  const defaultSeason = activeFile ? (activeFile.seasonNumber ?? (seasonNumbers.includes(0) ? 0 : null)) : (seasonNumbers[0] ?? null);
   const [selectedSeason, setSelectedSeason] = useState<number | null>(defaultSeason);
 
   // Track completed episodes
@@ -333,7 +342,7 @@ export function VideoPlayerScreen() {
   // Episodes visible in the panel — filtered to selected season (or all if no seasons)
   const visibleEpisodes = useMemo(() => {
     if (seasonNumbers.length === 0 || selectedSeason === null) return episodes;
-    return episodes.filter((ep) => ep.seasonNumber === selectedSeason);
+    return episodes.filter((ep) => (ep.seasonNumber ?? 0) === selectedSeason);
   }, [episodes, seasonNumbers, selectedSeason]);
 
   // Fetch completion status for all episodes when episodes list changes
@@ -478,8 +487,6 @@ export function VideoPlayerScreen() {
   const audioOpenRef = useRef(false); // keeping ref for auto-hide guard compatibility
   useEffect(() => { episodesOpenRef.current = episodesOpen; }, [episodesOpen]);
 
-  const [seasonDropdownOpen, setSeasonDropdownOpen] = useState(false);
-
   // ── Subtitle persistence ──────────────────────────────────────────────────
   // Auto-load: when the active file changes, check if we have a saved SRT for it
   useEffect(() => {
@@ -530,7 +537,7 @@ export function VideoPlayerScreen() {
   // Reset season to the playing episode's season when panel opens
   useEffect(() => {
     if (!episodesOpen) return;
-    setSelectedSeason(activeFile?.seasonNumber ?? seasonNumbers[0] ?? null);
+    setSelectedSeason(activeFile ? (activeFile.seasonNumber ?? (seasonNumbers.includes(0) ? 0 : null)) : (seasonNumbers[0] ?? null));
   }, [episodesOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Scroll to the active episode after the panel slide-in finishes (340ms)
@@ -1079,6 +1086,9 @@ export function VideoPlayerScreen() {
       return;
     }
     if (showControls) {
+      // Don't hide controls on tap if video is paused
+      if (!player?.playing) return;
+      
       setShowControls(false);
       overlayOpacity.value = withTiming(0, { duration: 380 });
       trackH.value = withTiming(2, { duration: 380 });
@@ -1087,7 +1097,7 @@ export function VideoPlayerScreen() {
     } else {
       revealControls();
     }
-  }, [locked, showControls, overlayOpacity, trackH, controlsPointer, revealControls]);
+  }, [locked, showControls, overlayOpacity, trackH, controlsPointer, revealControls, player]);
 
   const onDoubleTapSide = useCallback((side: 'left' | 'right') => {
     skipBy(side === 'left' ? -SKIP_SECONDS : SKIP_SECONDS);
@@ -1471,15 +1481,16 @@ export function VideoPlayerScreen() {
         <View style={[styles.sideModalRoot, { justifyContent: 'flex-end' }]}>
           <Pressable style={styles.sideBackdrop} onPress={() => { setEpisodesOpen(false); if (player?.playing) scheduleHide(); }} />
           <Animated.View
-            entering={FadeIn.duration(200)}
-            exiting={FadeOut.duration(200)}
+            entering={SlideInRight.duration(280)}
+            exiting={SlideOutRight.duration(260)}
             style={[
               styles.sidePanel,
               {
                 width: episodesPanelW,
-                marginTop: Math.max(insets.top, 16),
-                marginBottom: Math.max(insets.bottom, 16),
-                marginRight: Math.max(insets.right, 16),
+                marginTop: 0,
+                marginBottom: 0,
+                marginRight: 0,
+                borderRadius: 0,
               }
             ]}
           >
@@ -1530,7 +1541,7 @@ export function VideoPlayerScreen() {
                             styles.seasonPillText,
                             isActive && styles.seasonPillTextActive,
                           ]}>
-                            Season {s}
+                            {s === 0 ? 'Extras' : `Season ${s}`}
                           </Text>
                           <Text style={[
                             styles.seasonPillEpCount,
@@ -1553,7 +1564,6 @@ export function VideoPlayerScreen() {
               style={styles.panelScroll}
               contentContainerStyle={[styles.panelScrollContent, { paddingBottom: Math.max(padBot, 24) + 12 }]}
               showsVerticalScrollIndicator={false}
-              onScrollBeginDrag={() => setSeasonDropdownOpen(false)}
             >
               {visibleEpisodes.length === 0 && (
                 <View style={styles.panelEmptyWrap}>
@@ -1575,7 +1585,7 @@ export function VideoPlayerScreen() {
                     onPress={() => playEpisode(ep)}
                     onLayout={i === 0 ? (e) => {
                       const h = e.nativeEvent.layout.height;
-                      if (h > 0) epCardHeightRef.current = h;
+                      if (h > 0) epCardHeightRef.current = h + 10; // add marginBottom
                     } : undefined}
                   >
                     {ep.stillUrl && (
@@ -1631,15 +1641,15 @@ export function VideoPlayerScreen() {
         <View style={[styles.sideModalRoot, { justifyContent: 'flex-end' }]}>
           <Pressable style={styles.sideBackdrop} onPress={() => { setSubtitleOpen(false); setSubLangPickerOpen(false); if (player?.playing) scheduleHide(); }} />
           <Animated.View
-            entering={FadeIn.duration(200)}
-            exiting={FadeOut.duration(200)}
+            entering={SlideInRight.duration(280)}
+            exiting={SlideOutRight.duration(260)}
             style={[
               styles.sidePanel,
               {
                 width: Math.min(320, Math.max(300, Math.round(episodesPanelW * 1.05))),
-                marginTop: Math.max(insets.top, 16),
-                marginBottom: Math.max(insets.bottom, 16),
-                marginRight: Math.max(insets.right, 16),
+                marginTop: 0,
+                marginBottom: 0,
+                marginRight: 0,
               }
             ]}
           >
@@ -2167,7 +2177,6 @@ const styles = StyleSheet.create({
     alignSelf: 'stretch',
     maxWidth: 300,
     backgroundColor: 'rgba(0, 0, 0, 0.45)', // glassmorphic translucent base
-    borderRadius: 24,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
     paddingLeft: 0,

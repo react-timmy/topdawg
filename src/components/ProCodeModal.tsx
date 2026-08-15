@@ -143,18 +143,17 @@ export function ProCodeModal({ visible, onClose, onSuccess }: ProCodeModalProps)
       presentationStyle="overFullScreen"
       onRequestClose={onClose}
     >
-      <KeyboardAvoidingView
-        style={styles.backdrop}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={insets.bottom}
-      >
+      <View style={{ flex: 1 }}>
         <Pressable
           style={styles.backdropTap}
           onPress={Keyboard.dismiss}
           accessibilityLabel="Dismiss keyboard"
         />
-        <View style={[styles.sheet, { paddingBottom: insets.bottom + 24 }]}>
-          <View style={styles.handle} />
+        <KeyboardAvoidingView
+          style={styles.backdrop}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <View style={styles.sheet}>
           <Pressable style={styles.closeBtn} onPress={onClose} hitSlop={12}>
             <X size={18} color={ICON_COLOR} strokeWidth={2.5} />
           </Pressable>
@@ -236,7 +235,8 @@ export function ProCodeModal({ visible, onClose, onSuccess }: ProCodeModalProps)
             </>
           )}
         </View>
-      </KeyboardAvoidingView>
+        </KeyboardAvoidingView>
+      </View>
     </Modal>
   );
 }
@@ -246,26 +246,22 @@ export function ProCodeModal({ visible, onClose, onSuccess }: ProCodeModalProps)
 const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.78)',
-    justifyContent: 'flex-end',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   backdropTap: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0,0,0,0.78)',
   },
   sheet: {
-    width: '100%',
+    width: '85%',
     backgroundColor: '#111113',
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
+    borderRadius: 0,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.09)',
-    borderBottomWidth: 0,
-    paddingHorizontal: 24,
-    paddingTop: 10,
+    paddingHorizontal: 18,
+    paddingVertical: 24,
     alignItems: 'center',
-    alignSelf: 'stretch',
-    marginTop: 'auto',
     overflow: 'hidden',
   },
   handle: {
@@ -277,11 +273,11 @@ const styles = StyleSheet.create({
   },
   closeBtn: {
     position: 'absolute',
-    top: 14,
-    right: 16,
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    top: 10,
+    right: 12,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: 'rgba(255,255,255,0.05)',
@@ -290,33 +286,33 @@ const styles = StyleSheet.create({
 
   // Icon
   iconRing: {
-    width: 64,
-    height: 64,
-    borderRadius: 20,
+    width: 48,
+    height: 48,
+    borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: ICON_TINT,
     borderWidth: 1,
     borderColor: ICON_BORDER,
-    marginBottom: 14,
+    marginBottom: 10,
   },
 
   // Headings
   title: {
     color: '#ffffff',
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: '900',
-    letterSpacing: -0.4,
+    letterSpacing: -0.2,
     textAlign: 'center',
-    marginBottom: 6,
+    marginBottom: 4,
   },
   subtitle: {
     color: '#71717a',
-    fontSize: 13,
-    lineHeight: 19,
+    fontSize: 11,
+    lineHeight: 16,
     textAlign: 'center',
-    marginBottom: 22,
-    paddingHorizontal: 8,
+    marginBottom: 18,
+    paddingHorizontal: 4,
   },
 
   // Input
@@ -324,9 +320,9 @@ const styles = StyleSheet.create({
     width: '100%',
     borderWidth: 1.5,
     borderColor: 'rgba(255,255,255,0.12)',
-    borderRadius: 14,
+    borderRadius: 12,
     backgroundColor: 'rgba(255,255,255,0.04)',
-    marginBottom: 10,
+    marginBottom: 8,
   },
   inputWrapError: {
     borderColor: 'rgba(239,68,68,0.55)',
@@ -334,11 +330,11 @@ const styles = StyleSheet.create({
   },
   input: {
     color: '#ffffff',
-    fontSize: 18,
+    fontSize: 15,
     fontWeight: '700',
-    letterSpacing: 2,
-    paddingHorizontal: 18,
-    paddingVertical: 16,
+    letterSpacing: 1.5,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
     textAlign: 'center',
   },
 
@@ -362,21 +358,21 @@ const styles = StyleSheet.create({
   // Submit button
   submitBtn: {
     width: '100%',
-    height: 52,
-    borderRadius: 16,
+    height: 44,
+    borderRadius: 12,
     backgroundColor: '#a78bfa',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 10,
-    marginTop: 4,
+    gap: 8,
+    marginTop: 2,
   },
   submitBtnDisabled: {
     opacity: 0.38,
   },
   submitBtnText: {
     color: '#000000',
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '900',
   },
   footNote: {

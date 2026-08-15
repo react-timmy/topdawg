@@ -1613,8 +1613,6 @@ const styles = StyleSheet.create({
   },
   nameModalCard: {
     backgroundColor: '#111114',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
     borderWidth: 1,
     borderBottomWidth: 0,
     borderColor: 'rgba(255,255,255,0.09)',

@@ -70,6 +70,16 @@ const pendingDisambiguationResolves: Map<string, (id: string | null) => void> = 
 /** Seconds the on-screen Cancel control stays available. */
 const CANCEL_WINDOW_MS = 5000;
 
+const INITIAL_SCAN_PROGRESS: MediaScanProgress = {
+  phase: "preparing",
+  total: 0,
+  processed: 0,
+  scanned: 0,
+  matched: 0,
+  added: 0,
+  skipped: 0,
+};
+
 /**
  * Lives outside the component so a scan survives leaving Scanner (stack pop).
  * Leaving the screen means "go ahead" — never treat blur as cancel.
@@ -165,15 +175,7 @@ function CountUpText({ target, suffix = "" }: { target: number; suffix?: string 
   );
 }
 
-const INITIAL_SCAN_PROGRESS: MediaScanProgress = {
-  phase: "preparing",
-  total: 0,
-  processed: 0,
-  scanned: 0,
-  matched: 0,
-  added: 0,
-  skipped: 0,
-};
+
 
 function getPhaseLabel(progress: MediaScanProgress): string {
   const phase = progress.phase ?? "";

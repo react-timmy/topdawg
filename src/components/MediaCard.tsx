@@ -316,7 +316,7 @@ const styles = StyleSheet.create({
     fontWeight: "400",
   },
 
-  actionsContainer: { flexDirection: "row", gap: 10 },
+  actionsContainer: { flexDirection: "row", gap: 20 },
 
   playButton: {
     flex: 1.2,
@@ -327,7 +327,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#f8f8f8",
     paddingVertical: 14,
     paddingHorizontal: 12,
-    borderRadius: 16,
+    borderRadius: 2,
   },
   playButtonDisabled: {
     opacity: 0.45,
@@ -340,7 +340,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingHorizontal: 16,
     paddingVertical: 14,
-    borderRadius: 16,
+    borderRadius: 2,
     overflow: "hidden",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.06)",

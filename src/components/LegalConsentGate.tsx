@@ -23,6 +23,8 @@ import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ShieldCheck, ChevronRight, Square, CheckSquare, AlertCircle } from 'lucide-react-native';
 import Animated, { FadeIn, FadeInDown } from 'react-native-reanimated';
+import * as Notifications from 'expo-notifications';
+import * as MediaLibrary from 'expo-media-library';
 import { legalConsentService } from '../services/legalConsentService';
 
 interface LegalConsentGateProps {
@@ -44,6 +46,12 @@ export function LegalConsentGate({ onAccept, onDecline }: LegalConsentGateProps)
     if (!canAccept || saving) return;
     setSaving(true);
     try {
+      try {
+        await Notifications.requestPermissionsAsync();
+        await MediaLibrary.requestPermissionsAsync(false, ['video']);
+      } catch (e) {
+        // ignore permission errors
+      }
       await legalConsentService.saveConsent();
       onAccept();
     } catch {
