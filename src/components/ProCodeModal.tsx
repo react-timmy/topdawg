@@ -35,11 +35,12 @@ const ICON_COLOR = '#3f3f3fff';
 const ICON_TINT = 'rgba(63,63,63,0.16)';
 const ICON_BORDER = 'rgba(63,63,63,0.36)';
 
-if (
-  Platform.OS === 'android' &&
-  UIManager.setLayoutAnimationEnabledExperimental
-) {
-  UIManager.setLayoutAnimationEnabledExperimental(true);
+try {
+  if (Platform.OS === 'android' && typeof UIManager.setLayoutAnimationEnabledExperimental === 'function') {
+    UIManager.setLayoutAnimationEnabledExperimental(true);
+  }
+} catch (e) {
+  // ignore - no-op on new architecture
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────

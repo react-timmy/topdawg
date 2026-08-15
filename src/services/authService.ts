@@ -11,7 +11,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 import auth, { FirebaseAuthTypes, GoogleAuthProvider } from '@react-native-firebase/auth';
 import { GOOGLE_WEB_CLIENT_ID, ENABLE_CLOUD_SYNC } from '../config/env';
-import { clearProFlag } from '../storage/proStatusService';
+import { clearProFlag } from '../storage/proFlags';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

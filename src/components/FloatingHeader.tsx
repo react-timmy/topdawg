@@ -171,15 +171,6 @@ export function FloatingHeader({
               </Pressable>
             )}
 
-            {/* Scanner action: white-background icon immediately after Notifications */}
-            <Pressable
-              style={[styles.iconBtn, styles.scanIconBtn]}
-              onPress={() => navigation.navigate('Scanner')}
-              hitSlop={10}
-            >
-              <ScanLine size={18} color="#000000" />
-            </Pressable>
-
             {onSettingsPress && (
               <Pressable style={styles.iconBtn} onPress={onSettingsPress} hitSlop={10}>
                 <Settings size={19} color="#52525b" />

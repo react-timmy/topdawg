@@ -7,6 +7,7 @@ import { cloudStarredService, CloudStarredEntry } from '../storage/cloudStarredS
 import { syncService } from '../services/syncService';
 import { useAccount } from '../context/AccountContext';
 import { MediaItem } from '../types';
+import { CollectionsFab } from '../components/CollectionsFab';
 
 export function LibraryScreen() {
   const [items, setItems] = useState<MediaItem[]>([]);
@@ -95,6 +96,8 @@ export function LibraryScreen() {
         onHeaderHeightChange={setHeaderOffset}
         onSettingsPress={() => navigation.navigate('Settings')}
       />
+      {/* Collections FAB: only shown on Library screen */}
+      <CollectionsFab />
     </View>
   );
 }

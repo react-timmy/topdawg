@@ -6,6 +6,7 @@ import { storageService } from "../storage/asyncStorage";
 import { MediaItem } from "../types";
 import { MediaCard } from "../components/MediaCard";
 import { FloatingHeader } from "../components/FloatingHeader";
+import { ScanFab } from "../components/ScanFab";
 import Animated, { useSharedValue , FadeIn } from "react-native-reanimated";
 import { Tv, ScanLine } from "lucide-react-native";
 import { watchProgressService, setOnProgressChanged } from "../storage/watchProgressService";
@@ -42,6 +43,20 @@ export function TVScreen() {
   const scrollY = useSharedValue(0);
   const [scannerVisible, setScannerVisible] = useState(true);
   const lastScrollY = React.useRef(0);
+
+  useEffect(() => {
+    let mounted = true;
+    void (async () => {
+      try {
+        const v = await storageService.getScanFabVisibility();
+        if (mounted) setScannerVisible(!!v);
+      } catch (e) { /* ignore */ }
+    })();
+    storageService.setOnScanFabVisibilityChanged((v) => {
+      if (mounted) setScannerVisible(!!v);
+    });
+    return () => { mounted = false; storageService.setOnScanFabVisibilityChanged(null); };
+  }, []);
 
   const insets = useSafeAreaInsets();
 
@@ -132,8 +147,14 @@ export function TVScreen() {
         onScroll={(e) => {
           const y = e.nativeEvent.contentOffset.y;
           const dy = y - lastScrollY.current;
-          if (dy < -5) setScannerVisible(true);
-          else if (dy > 5) setScannerVisible(false);
+          // If scrolling up (dy < -5) show scanner; scrolling down (dy > 5) hide it
+          if (dy < -5 && !scannerVisible) {
+            setScannerVisible(true);
+            void storageService.saveScanFabVisibility(true);
+          } else if (dy > 5 && scannerVisible) {
+            setScannerVisible(false);
+            void storageService.saveScanFabVisibility(false);
+          }
           lastScrollY.current = y;
         }}
         scrollEventThrottle={16}
@@ -146,6 +167,7 @@ export function TVScreen() {
         onSearchPress={() => navigation.navigate("Search")}
         showLogo
       />
+      <ScanFab visible={scannerVisible} />
     </View>
   );
 }

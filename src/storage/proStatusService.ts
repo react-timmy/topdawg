@@ -20,10 +20,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { authService } from '../services/authService';
 import { syncService } from '../services/syncService';
 import { profileService } from './profileService';
+import { clearProFlag, KEY_PRO } from './proFlags';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const KEY_PRO         = '@filmsort:pro_unlocked';
 const KEY_MONTH       = '@filmsort:scan_month';
 const KEY_FILES       = '@filmsort:scan_files_used';
 const KEY_REDEEMED    = '@filmsort:redeemed_code';
@@ -212,19 +212,8 @@ export async function resetProStatus(): Promise<void> {
   }
 }
 
-/**
- * Remove the Pro flag only (used when the signed-in user signs out so the device
- * returns to the free plan). Does not clear redeemed-code lock or monthly counters.
- */
-export async function clearProFlag(): Promise<void> {
-  try {
-    await AsyncStorage.removeItem(KEY_PRO);
-    console.log('[ProStatus] Pro flag cleared (sign-out).');
-  } catch (err) {
-    console.warn('[ProStatus] clearProFlag failed:', err);
-  }
-}
-
+// clearProFlag moved to src/storage/proFlags.ts to avoid a require cycle with authService.
+// Re-export the implementation from the new module (imported at top).
 /**
  * Attempt to redeem a Pro unlock code entered by the user.
  *

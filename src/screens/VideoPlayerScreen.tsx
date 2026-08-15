@@ -1952,7 +1952,7 @@ export function VideoPlayerScreen() {
                               <Text style={styles.audioOptionText} numberOfLines={2}>{hit.release || hit.fileName}</Text>
                               <Text style={styles.audioTrackSub}>
                                 {hit.language.toUpperCase()} · {hit.downloads.toLocaleString()} downloads
-                                {hit.rating > 0 ? ` · ★ ${hit.rating.toFixed(1)}` : ''}
+                                {hit.rating != null && hit.rating > 0 ? ` · ★ ${hit.rating.toFixed(1)}` : ''}
                               </Text>
                             </View>
                           </Pressable>

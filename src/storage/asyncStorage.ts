@@ -265,4 +265,146 @@ export const storageService = {
       // silently fail
     }
   },
+
+  // ── Scan status (for UI indicators) ───────────────────────────────────────
+  async getScanStatus(): Promise<string | null> {
+    try {
+      const raw = await AsyncStorage.getItem(SCAN_STATUS_KEY);
+      return raw;
+    } catch {
+      return null;
+    }
+  },
+
+  async saveScanStatus(status: string): Promise<void> {
+    try {
+      await AsyncStorage.setItem(SCAN_STATUS_KEY, status);
+      // notify hook if set
+      try { _onScanStatusChanged?.(status); } catch (e) { /* ignore */ }
+    } catch (err) {
+      console.error('[Storage] saveScanStatus failed:', err);
+    }
+  },
+
+  async clearScanStatus(): Promise<void> {
+    try {
+      await AsyncStorage.removeItem(SCAN_STATUS_KEY);
+      try { _onScanStatusChanged?.('idle'); } catch (e) { /* ignore */ }
+    } catch {
+      // silently fail
+    }
+  },
+
+  // ── Scan FAB visibility (shared between Movies/TV screens)
+  async getScanFabVisibility(): Promise<boolean> {
+    if (lastSavedVisibility !== null) {
+      return lastSavedVisibility;
+    }
+    try {
+      const raw = await AsyncStorage.getItem(SCAN_FAB_VISIBLE_KEY);
+      const val = raw === null ? true : raw === '1';
+      lastSavedVisibility = val;
+      return val;
+    } catch {
+      return true;
+    }
+  },
+
+  async saveScanFabVisibility(visible: boolean): Promise<void> {
+    if (lastSavedVisibility === visible) {
+      return;
+    }
+    lastSavedVisibility = visible;
+    try {
+      await AsyncStorage.setItem(SCAN_FAB_VISIBLE_KEY, visible ? '1' : '0');
+      try { _onScanFabVisibilityChanged?.(visible); } catch (e) { /* ignore */ }
+    } catch (err) {
+      console.error('[Storage] saveScanFabVisibility failed:', err);
+    }
+  },
 };
+
+// Add scan status key and hook definitions after exports (module-scoped)
+const SCAN_STATUS_KEY = '@cinescan:scan_status';
+let _onScanStatusChanged: ((s: string) => void) | null = null;
+
+export function setOnScanStatusChanged(cb: ((s: string) => void) | null) {
+  _onScanStatusChanged = cb;
+}
+
+// Scan FAB visibility key + hook
+const SCAN_FAB_VISIBLE_KEY = '@cinescan:scan_fab_visible';
+let _onScanFabVisibilityChanged: ((v: boolean) => void) | null = null;
+let lastSavedVisibility: boolean | null = null;
+
+export function setOnScanFabVisibilityChanged(cb: ((v: boolean) => void) | null) {
+  _onScanFabVisibilityChanged = cb;
+}
+
+// ── Last scan summary persistence ───────────────────────────────────────────
+const LAST_SCAN_KEY = '@cinescan:last_scan_result';
+
+export type LastScanResult = {
+  timestamp: string;
+  progress?: {
+    total?: number;
+    processed?: number;
+    scanned?: number;
+    matched?: number;
+    added?: number;
+    skipped?: number;
+    phase?: string;
+  };
+  matched?: Array<{ id?: string; title?: string; posterUrl?: string; filename?: string }>;
+  unmatched?: Array<{ uri?: string; filename?: string }>;
+};
+
+export async function saveLastScanResult(result: LastScanResult | null): Promise<void> {
+  try {
+    if (result === null) {
+      await AsyncStorage.removeItem(LAST_SCAN_KEY);
+      return;
+    }
+    await AsyncStorage.setItem(LAST_SCAN_KEY, JSON.stringify(result));
+  } catch (err) {
+    console.error('[Storage] saveLastScanResult failed:', err);
+  }
+}
+
+export async function getLastScanResult(): Promise<LastScanResult | null> {
+  try {
+    const raw = await AsyncStorage.getItem(LAST_SCAN_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as LastScanResult;
+  } catch (err) {
+    return null;
+  }
+}
+
+export async function clearLastScanResult(): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(LAST_SCAN_KEY);
+  } catch (err) {
+    // ignore
+  }
+}
+
+// Attach helpers onto storageService for convenience
+try {
+  // @ts-ignore - dynamic augmentation
+  storageService.saveLastScanResult = saveLastScanResult;
+  // @ts-ignore
+  storageService.getLastScanResult = getLastScanResult;
+  // @ts-ignore
+  storageService.clearLastScanResult = clearLastScanResult;
+  // Attach FAB visibility hook for compatibility (allows storageService.setOnScanFabVisibilityChanged(...))
+  try {
+    // @ts-ignore
+    storageService.setOnScanFabVisibilityChanged = setOnScanFabVisibilityChanged;
+  } catch (err) {
+    // ignore
+  }
+} catch (e) {
+  // ignore
+}
+

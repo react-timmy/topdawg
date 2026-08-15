@@ -117,7 +117,7 @@ function SimilarCard({ sim }: { sim: MediaItem }) {
       <Text style={styles.similarTitle} numberOfLines={2}>{sim.title}</Text>
       <View style={styles.similarMeta}>
         <Star size={10} color="#4ade80" fill="#4ade80" />
-        <Text style={styles.similarMetaText}>{sim.rating.toFixed(1)}</Text>
+        <Text style={styles.similarMetaText}>{sim.rating != null ? sim.rating.toFixed(1) : '—'}</Text>
         {sim.releaseDate ? (
           <Text style={styles.similarMetaText}>· {sim.releaseDate.split('-')[0]}</Text>
         ) : null}
@@ -856,7 +856,7 @@ export function DetailsScreen() {
 
               {/* Star rating */}
               <Star size={11} color="#4ade80" fill="#4ade80" />
-              <Text style={styles.infoStripText}>{item.rating.toFixed(1)}</Text>
+              <Text style={styles.infoStripText}>{item.rating != null ? item.rating.toFixed(1) : '—'}</Text>
 
               <View style={styles.infoStripDot} />
 

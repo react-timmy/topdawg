@@ -35,11 +35,15 @@ import { FREE_SCAN_LIMIT } from '../storage/proStatusService';
 import { usePro } from '../context/ProContext';
 import { ProCodeModal } from './ProCodeModal';
 
-if (
-  Platform.OS === 'android' &&
-  UIManager.setLayoutAnimationEnabledExperimental
-) {
-  UIManager.setLayoutAnimationEnabledExperimental(true);
+// LayoutAnimation experimental toggle is a no-op under the New Architecture.
+// Keep safe guard for older RN but avoid logging the warning: only call when
+// the function exists and the runtime indicates support.
+try {
+  if (Platform.OS === 'android' && typeof UIManager.setLayoutAnimationEnabledExperimental === 'function') {
+    UIManager.setLayoutAnimationEnabledExperimental(true);
+  }
+} catch (e) {
+  // ignore - no-op on new architecture
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────

@@ -306,7 +306,7 @@ export function RecentlyAddedList({ items, onDismiss, onRematchSuccess }: Recent
 
       <FlatList
         data={items}
-        keyExtractor={(item) => `${item.id}-${item.localFile?.uri ?? ''}`}
+        keyExtractor={(item, idx) => `${item.id}-${item.localFile?.uri ?? item.localFile?.filename ?? idx}`}
         horizontal
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.listContent}

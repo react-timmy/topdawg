@@ -119,14 +119,14 @@ export function CollectionsScreen() {
 
       {renderContent()}
 
-      <View style={[styles.fabContainer, { bottom: insets.bottom + 24 }]}>
+      <View style={[styles.fabContainer, { right: -15, bottom: insets.bottom + 55 }]}>
         <Pressable
           style={({ pressed }) => [styles.fab, pressed && { opacity: 0.92 }]}
           onPress={() => setCreateModalVisible(true)}
           accessibilityRole="button"
           accessibilityLabel="Create new collection"
         >
-          <Plus size={24} color="#000000" strokeWidth={2.8} />
+          <Plus size={26} color="#000000" strokeWidth={2.8} />
         </Pressable>
       </View>
 
@@ -210,21 +210,26 @@ const styles = StyleSheet.create({
   },
   fabContainer: {
     position: 'absolute',
-    right: 16,
-  },
-  fab: {
-    flexDirection: 'row',
+    zIndex: 140,
+    elevation: 140,
+    width: 140,
+    height: 140,
     alignItems: 'center',
     justifyContent: 'center',
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    pointerEvents: 'box-none',
+  },
+  fab: {
+    width: 66,
+    height: 66,
+    borderRadius: 33,
+    alignItems: 'center',
+    justifyContent: 'center',
     backgroundColor: '#ffffff',
     shadowColor: '#000000',
     shadowOpacity: 0.12,
     shadowRadius: 8,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 8,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 12,
   },
   fabLabel: {
     color: '#000000',

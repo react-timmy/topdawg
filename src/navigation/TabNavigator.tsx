@@ -15,7 +15,6 @@ import { MoviesScreen } from "../screens/MoviesScreen";
 import { TVScreen } from "../screens/TVScreen";
 import { LibraryScreen } from "../screens/LibraryScreen";
 import { ProfileScreen } from "../screens/ProfileScreen";
-import { CollectionsScreen } from "../screens/CollectionsScreen";
 import { ScannerScreen } from "../screens/ScannerScreen";
 
 // ─── Tab config ───────────────────────────────────────────────────────────────
@@ -23,7 +22,6 @@ import { ScannerScreen } from "../screens/ScannerScreen";
 const TAB_CONFIG: Record<string, { icon: LucideIcon; label: string }> = {
   Movies: { icon: Film, label: "Movies" },
   TV: { icon: Tv, label: "TV Shows" },
-  Collections: { icon: FolderHeart, label: "Collections" },
   Library: { icon: BookOpen, label: "Library" },
   Profile: { icon: User, label: "You" },
 };
@@ -168,7 +166,6 @@ export function TabNavigator() {
     >
       <Tab.Screen name="Movies"  component={MoviesScreen} />
       <Tab.Screen name="TV"      component={TVScreen} />
-      <Tab.Screen name="Collections" component={CollectionsScreen} />
       <Tab.Screen name="Library" component={LibraryScreen} />
       <Tab.Screen name="Profile" component={ProfileScreen} />
     </Tab.Navigator>

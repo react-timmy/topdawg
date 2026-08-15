@@ -127,7 +127,7 @@ export function ListItemRow({ item, rank, onLongPress, onPress }: ListItemRowPro
               <>
                 <Text style={styles.metaSep}>·</Text>
                 <Star size={10} color="#f59e0b" fill="#f59e0b" strokeWidth={0} />
-                <Text style={styles.metaText}>{item.rating.toFixed(1)}</Text>
+                <Text style={styles.metaText}>{item.rating != null ? item.rating.toFixed(1) : '—'}</Text>
               </>
             )}
           </View>

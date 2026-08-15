@@ -27,8 +27,6 @@ export type TabParamList = {
   Movies: undefined;
   TV: undefined;
   Library: undefined;
-  Party: undefined;
-  Collections: undefined;
   Profile: undefined;
 };
 

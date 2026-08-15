@@ -154,7 +154,7 @@ function GridCard({
           {/* Rating Badge */}
           <View style={styles.ratingBadge}>
             <Star size={9} color="#4ade80" fill="#4ade80" />
-            <Text style={styles.ratingBadgeText}>{item.rating.toFixed(1)}</Text>
+            <Text style={styles.ratingBadgeText}>{item.rating != null ? item.rating.toFixed(1) : '—'}</Text>
           </View>
 
           {/* Duration Badge */}
@@ -264,7 +264,7 @@ function ListCard({
             </View>
             <View style={styles.ratingRow}>
               <Star size={10} color="#facc15" fill="#facc15" />
-              <Text style={styles.listRating}>{item.rating.toFixed(1)}</Text>
+              <Text style={styles.listRating}>{item.rating != null ? item.rating.toFixed(1) : '—'}</Text>
             </View>
             {item.type === 'movie' && item.runtime && (
               <View style={styles.ratingRow}>
@@ -512,7 +512,7 @@ function StarredCard({
           {entry.rating !== undefined && entry.rating > 0 && (
             <View style={styles.ratingBadge}>
               <Star size={9} color="#4ade80" fill="#4ade80" />
-              <Text style={styles.ratingBadgeText}>{entry.rating.toFixed(1)}</Text>
+              <Text style={styles.ratingBadgeText}>{entry.rating != null ? entry.rating.toFixed(1) : '—'}</Text>
             </View>
           )}
 
@@ -598,7 +598,7 @@ function StarredCard({
             {entry.rating !== undefined && entry.rating > 0 && (
               <View style={styles.ratingRow}>
                 <Star size={10} color="#facc15" fill="#facc15" />
-                <Text style={styles.listRating}>{entry.rating.toFixed(1)}</Text>
+                <Text style={styles.listRating}>{entry.rating != null ? entry.rating.toFixed(1) : '—'}</Text>
               </View>
             )}
             {entry.releaseDate && (

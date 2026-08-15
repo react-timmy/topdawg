@@ -170,7 +170,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({ item, index = 0, onPress }
         <View style={styles.badgesContainer}>
           <View style={styles.badge}>
             <Star size={12} color="#4ade80" fill="#4ade80" />
-            <Text style={styles.badgeText}>{item.rating.toFixed(1)}</Text>
+            <Text style={styles.badgeText}>{item.rating != null ? item.rating.toFixed(1) : '—'}</Text>
           </View>
           <View style={styles.badge}>
             <Calendar size={12} color="#a1a1aa" />

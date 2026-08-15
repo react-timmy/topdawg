@@ -73,6 +73,12 @@ const scansBannerStyles = StyleSheet.create({
 });
 
 export function ScannerScreen() {
+  const mountedRef = React.useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
   const [headerHeight, setHeaderHeight] = useState(0);
   const [unmatchedFiles, setUnmatchedFiles] = useState<LocalFile[]>([]);
   const [recentlyMatched, setRecentlyMatched] = useState<MediaItem[]>([]);
@@ -93,7 +99,7 @@ export function ScannerScreen() {
     useCallback(() => {
       let active = true;
       legalConsentService.hasValidConsent().then((valid) => {
-        if (active) setConsentRequired(!valid);
+        if (active && mountedRef.current) setConsentRequired(!valid);
       });
       return () => { active = false; };
     }, []),
@@ -104,16 +110,43 @@ export function ScannerScreen() {
     let cancelled = false;
     (async () => {
       const saved = await storageService.getRecentlyMatched();
-      if (!cancelled) {
+      if (!cancelled && mountedRef.current) {
         setRecentlyMatched(saved);
         setRecentLoaded(true);
       }
+
+      // Also restore last scan summary so the full scan UI can reflect
+      // the most recent completed scan even if the user was away during it.
+      try {
+        const last = await storageService.getLastScanResult();
+        if (last) {
+          // Build a MediaScanResult-like object to reuse existing handler
+          const fakeResult: MediaScanResult = {
+            matched: (last.matched || []).map((m) => ({
+              id: m.id ?? 'unknown',
+              title: m.title ?? 'Unknown',
+              posterUrl: m.posterUrl,
+              // localFile unavailable here; ScannerScreen will merge from storage
+            })) as any,
+            unmatched: (last.unmatched || []).map((u) => ({ uri: u.uri ?? '', filename: u.filename ?? '' })) as any,
+          };
+          // Populate UI state via existing handler — it will merge gracefully
+          void handleScanComplete(fakeResult);
+          // Show the unmatched files in the Scanner UI as well
+          if (!cancelled && mountedRef.current) {
+            setUnmatchedFiles((last.unmatched || []).map((u) => ({ uri: u.uri ?? '', filename: u.filename ?? '' })));
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+
     })();
     return () => { cancelled = true; };
   }, []);
 
   const persistRecentlyMatched = useCallback(async (items: MediaItem[]) => {
-    setRecentlyMatched(items);
+    if (mountedRef.current) setRecentlyMatched(items);
     await storageService.saveRecentlyMatched(items);
   }, []);
 
@@ -121,10 +154,28 @@ export function ScannerScreen() {
     // 1. Persist all matches in one write so multi-episode shows keep every file
     if (result?.matched?.length) {
       try {
+        try {
+          console.log(`[ScannerScreen] handleScanComplete: matched ${result.matched.length} item(s): ${result.matched.map(m => m.id).join(',')}`);
+        } catch (e) {}
+
+        // Diagnostic: library size before save
+        try {
+          const before = await storageService.getLibrary();
+          console.log(`[ScannerScreen] library before save: ${before.length}`);
+        } catch (e) {
+          console.warn('[ScannerScreen] Failed to read library before save', e);
+        }
+
         await storageService.addItems(result.matched);
-        console.log(
-          `[ScannerScreen] Saved ${result.matched.length} matched file(s) to library`,
-        );
+
+        try {
+          const after = await storageService.getLibrary();
+          console.log(`[ScannerScreen] library after save: ${after.length}`);
+        } catch (e) {
+          console.warn('[ScannerScreen] Failed to read library after save', e);
+        }
+
+        console.log(`[ScannerScreen] Saved ${result.matched.length} matched file(s) to library`);
       } catch (err) {
         console.error('[ScannerScreen] Failed to save matched items:', err);
       }
@@ -136,28 +187,30 @@ export function ScannerScreen() {
         const newItems = result.matched.filter((m) => !existing.has(matchedFileKey(m)));
         const next = [...newItems, ...prev];
         await storageService.saveRecentlyMatched(next);
-        setRecentlyMatched(next);
+        if (mountedRef.current) setRecentlyMatched(next);
       } catch (err) {
         console.error('[ScannerScreen] Failed to update recently matched:', err);
-        setRecentlyMatched((prev) => {
-          const existing = new Set(prev.map(matchedFileKey));
-          const newItems = result.matched!.filter((m) => !existing.has(matchedFileKey(m)));
-          return [...newItems, ...prev];
-        });
+        if (mountedRef.current) {
+          setRecentlyMatched((prev) => {
+            const existing = new Set(prev.map(matchedFileKey));
+            const newItems = result.matched!.filter((m) => !existing.has(matchedFileKey(m)));
+            return [...newItems, ...prev];
+          });
+        }
       }
     }
 
     // 2. Capture unmatched files to display below the scanner card
     if (result?.unmatched) {
-      setUnmatchedFiles(result.unmatched);
+      if (mountedRef.current) setUnmatchedFiles(result.unmatched);
     } else {
-      setUnmatchedFiles([]);
+      if (mountedRef.current) setUnmatchedFiles([]);
     }
   }, []);
 
   const handleMatchSuccess = useCallback(async (file: LocalFile, matchedItem: MediaItem) => {
     await storageService.addItem(matchedItem);
-    setUnmatchedFiles((prev) => prev.filter((f) => f.uri !== file.uri));
+    if (mountedRef.current) setUnmatchedFiles((prev) => prev.filter((f) => f.uri !== file.uri));
     setRecentlyMatched((prev) => {
       const next = [matchedItem, ...prev.filter((p) => matchedFileKey(p) !== matchedFileKey(matchedItem))];
       void storageService.saveRecentlyMatched(next);
@@ -166,7 +219,7 @@ export function ScannerScreen() {
   }, []);
 
   const handleIgnore = useCallback((file: LocalFile) => {
-    setUnmatchedFiles((prev) => prev.filter((f) => f.uri !== file.uri));
+    if (mountedRef.current) setUnmatchedFiles((prev) => prev.filter((f) => f.uri !== file.uri));
   }, []);
 
   const handleDismissRecentlyMatched = useCallback(async () => {
@@ -214,7 +267,6 @@ export function ScannerScreen() {
         contentContainerStyle={[styles.scroll, { paddingTop: headerHeight + 24, paddingBottom: insets.bottom + 160 }]}
         showsVerticalScrollIndicator={false}
       >
-        <ScansBanner />
         <Scanner onScanComplete={handleScanComplete} />
 
         {recentLoaded && (
