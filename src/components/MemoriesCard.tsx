@@ -238,7 +238,7 @@ export function MemoriesCard({
             ) : null}
 
             <View style={styles.topLabel}>
-              <Crown size={11} color="#a78bfa" strokeWidth={2.5} />
+              <Crown size={11} color="#3f3f3fff" strokeWidth={2.5} />
               <Text style={styles.topLabelText}>MEMORIES</Text>
             </View>
 
@@ -472,9 +472,9 @@ const styles = StyleSheet.create({
     gap: 5,
   },
   topLabelText: {
-    fontSize: 10,
+    fontSize: 15,
     fontWeight: '800',
-    color: '#a78bfa',
+    color: '#ffffff',
     letterSpacing: 1.8,
   },
   watermarkWrap: {

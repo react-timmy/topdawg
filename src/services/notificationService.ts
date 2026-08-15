@@ -1,7 +1,8 @@
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { UpcomingItem } from '../types';
-import { navigateToNotificationsUpcoming } from '../navigation/navigationRef';
+import { navigateToNotificationsUpcoming, navigateToScanner } from '../navigation/navigationRef';
 
 // ─── Channel setup (Android) ──────────────────────────────────────────────────
 
@@ -12,6 +13,10 @@ if (Platform.OS === 'android') {
     vibrationPattern: [0, 250, 250, 250],
     lightColor: '#60a5fa',
   });
+  Notifications.setNotificationChannelAsync('scan', {
+    name: 'Scanning',
+    importance: Notifications.AndroidImportance.DEFAULT,
+  }).catch(() => {});
 }
 
 // ─── Notification handler ────────────────────────────────────────────────────
@@ -29,7 +34,25 @@ Notifications.setNotificationHandler({
 // Hours before release to fire the reminder
 const HOURS_BEFORE_RELEASE = 3;
 
+// Pending disambiguations key
+const PENDING_DISAMBIG_KEY = '@cinescan:pending_disambiguation';
+
+// Last scan notification id (so updates replace previous)
+let _lastScanNotificationId: string | null = null;
+let _lastScanNotifAt = 0;
+const SCAN_NOTIF_MIN_INTERVAL_MS = 4000;
+
 // ─── Request permissions ──────────────────────────────────────────────────────
+
+/** Read-only — never prompts. Safe to call mid-scan. */
+export async function hasNotificationPermission(): Promise<boolean> {
+  try {
+    const { status } = await Notifications.getPermissionsAsync();
+    return status === 'granted';
+  } catch {
+    return false;
+  }
+}
 
 async function requestPermissions(): Promise<boolean> {
   const { status: existing } = await Notifications.getPermissionsAsync();
@@ -44,6 +67,14 @@ async function requestPermissions(): Promise<boolean> {
   } finally {
     (globalThis as any).__setPickerActive?.(false);
   }
+}
+
+/**
+ * Ask once while the user is still on the Scanner screen (e.g. cancel window).
+ * Do not call this from per-file progress updates — the OS sheet would pause the scan.
+ */
+export async function requestScanNotificationPermission(): Promise<boolean> {
+  return requestPermissions();
 }
 
 /**
@@ -123,7 +154,111 @@ export async function cancelNotificationsForItem(itemId: string): Promise<void> 
   await Promise.all(toCancel.map((n) => Notifications.cancelScheduledNotificationAsync(n.identifier)));
 }
 
-// ─── Tap handler (deep-link → Notifications → Upcoming) ──────────────────────
+// ─── Immediate / scan notifications ──────────────────────────────────────────
+
+export async function showScanNotification(progress: { phase?: string; processed?: number; total?: number; matched?: number; added?: number; scanned?: number }) {
+  // Never prompt here — a permission sheet mid-scan backgrounds the app and stalls work.
+  const granted = await hasNotificationPermission();
+  if (!granted) return null;
+
+  const phase = progress.phase ?? '';
+  const isMilestone = /preparing|complete|Queued|Saving|Done|Starting/i.test(phase);
+  const now = Date.now();
+  if (!isMilestone && now - _lastScanNotifAt < SCAN_NOTIF_MIN_INTERVAL_MS) {
+    return _lastScanNotificationId;
+  }
+  _lastScanNotifAt = now;
+
+  const title = 'Scanning your library';
+  const body = progress.total
+    ? `${progress.processed ?? 0}/${progress.total} processed · ${progress.matched ?? 0} matched`
+    : (phase || 'Working…');
+
+  try {
+    const scheduleOpts: any = {
+      content: {
+        title,
+        body,
+        data: { screen: 'Scanner', type: 'scan_progress', progress },
+        ...(Platform.OS === 'android' && { channelId: 'scan' }),
+      },
+      trigger: null,
+    };
+    if (_lastScanNotificationId) {
+      scheduleOpts.identifier = _lastScanNotificationId;
+    }
+
+    const id = await Notifications.scheduleNotificationAsync(scheduleOpts);
+    _lastScanNotificationId = id;
+    return id;
+  } catch (e) {
+    console.warn('[Notification] showScanNotification failed', e);
+    return null;
+  }
+}
+
+export async function showScanCompleteNotification(summary: { matchedCount: number; unmatchedCount?: number }) {
+  const granted = await hasNotificationPermission();
+  if (!granted) return null;
+  try {
+    const unmatched = summary.unmatchedCount ?? 0;
+    const body =
+      unmatched > 0
+        ? `Added ${summary.matchedCount} · ${unmatched} still need a match.`
+        : `Added ${summary.matchedCount} items to your library.`;
+    const scheduleOpts: any = {
+      content: {
+        title: 'Scan complete',
+        body,
+        data: { screen: 'Scanner', type: 'scan_complete', summary },
+        ...(Platform.OS === 'android' && { channelId: 'scan' }),
+      },
+      trigger: null,
+    };
+    if (_lastScanNotificationId) scheduleOpts.identifier = _lastScanNotificationId;
+    const id = await Notifications.scheduleNotificationAsync(scheduleOpts);
+    _lastScanNotificationId = id;
+    return id;
+  } catch (e) {
+    console.warn('[Notification] showScanCompleteNotification failed', e);
+    return null;
+  }
+}
+
+export async function dismissScanProgressNotification(): Promise<void> {
+  if (!_lastScanNotificationId) return;
+  try {
+    await Notifications.dismissNotificationAsync(_lastScanNotificationId);
+  } catch {
+    /* ignore */
+  }
+}
+
+export async function showDisambiguationNotification(payload: { filename: string; title?: string; optionsCount?: number; entryId?: string }) {
+  const granted = await hasNotificationPermission();
+  if (!granted) return null;
+
+  try {
+    // Note: Scanner.tsx already persists the disambiguation state with full options.
+    // We do not persist here to avoid overwriting it with a partial entry.
+
+    const id = await Notifications.scheduleNotificationAsync({
+      content: {
+        title: `Which match for ${payload.filename}?`,
+        body: `Tap to open app and choose the correct match (${payload.optionsCount ?? 0} choices).`,
+        data: { screen: 'Scanner', action: 'disambiguate', entryId: entry.id },
+        ...(Platform.OS === 'android' && { channelId: 'scan' }),
+      },
+      trigger: { type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL, seconds: 1 },
+    });
+    return id;
+  } catch (e) {
+    console.warn('[Notification] showDisambiguationNotification failed', e);
+    return null;
+  }
+}
+
+// ─── Tap handler (deep-link) ─────────────────────────────────────────────────
 
 let handledResponseId: string | null = null;
 
@@ -134,7 +269,6 @@ function shouldOpenUpcoming(data: unknown): boolean {
 }
 
 function openUpcomingFromNotification() {
-  // Retry until NavigationContainer is ready (cold start)
   const tryNav = (attempt = 0) => {
     try {
       navigateToNotificationsUpcoming();
@@ -147,24 +281,38 @@ function openUpcomingFromNotification() {
   setTimeout(() => tryNav(), 150);
 }
 
+function handleScannerNotification(data: any) {
+  const tryNav = (attempt = 0) => {
+    try {
+      navigateToScanner();
+    } catch {
+      if (attempt < 10) setTimeout(() => tryNav(attempt + 1), 200);
+    }
+  };
+  setTimeout(() => tryNav(), 150);
+}
+
 export function setupNotificationTapHandler(): () => void {
   const handleResponse = (response: Notifications.NotificationResponse) => {
     const id = response.notification.request.identifier;
     if (handledResponseId === id) return;
     handledResponseId = id;
-    if (shouldOpenUpcoming(response.notification.request.content.data)) {
+    const data = response.notification.request.content.data;
+    if (shouldOpenUpcoming(data)) {
       openUpcomingFromNotification();
+      return;
+    }
+    if (data && typeof data === 'object' && data.screen === 'Scanner') {
+      handleScannerNotification(data);
+      return;
     }
   };
 
-  // Fires for warm taps and typically also when app is opened from a killed state
   const sub = Notifications.addNotificationResponseReceivedListener(handleResponse);
 
-  // Cold start fallback — only if interaction was within the last 20 seconds
   Notifications.getLastNotificationResponseAsync().then((response) => {
     if (!response) return;
     const notifDate = response.notification.date;
-    // expo may return seconds or ms depending on platform
     const ms = notifDate < 1e12 ? notifDate * 1000 : notifDate;
     if (Date.now() - ms > 20_000) return;
     handleResponse(response);

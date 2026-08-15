@@ -8,6 +8,9 @@ import {
   Dimensions,
   RefreshControl,
   Modal,
+  TextInput,
+  KeyboardAvoidingView,
+  Platform,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import Animated, {
@@ -32,11 +35,16 @@ import {
   Clock,
   Calendar,
   Check,
+  Tv2,
+  FolderHeart,
 } from "lucide-react-native";
 import { useNavigation } from "@react-navigation/native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useAccount } from "../context/AccountContext";
 import { MediaItem } from "../types";
+import { CloudStarredEntry } from "../storage/cloudStarredService";
 import { FloatingHeader } from "./FloatingHeader";
-import { watchProgressService } from "../storage/watchProgressService";
+import { watchProgressService, setOnProgressChanged } from "../storage/watchProgressService";
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
 const GRID_ITEM_WIDTH = (SCREEN_WIDTH - 48 - 12) / 2; // 2-col grid with padding and gap
@@ -50,8 +58,14 @@ type NavigationProp = any; // Simplify to any to support both Tab and Root stack
 
 interface LibraryViewProps {
   items: MediaItem[];
+  /** Cloud-only starred entries (no local file) — shown only in the starred tab */
+  cloudStarredItems?: CloudStarredEntry[];
   onDelete: (id: string) => void;
   onToggleStar?: (id: string) => void;
+  /** Called when starring a TV show — provides the episode the user entered */
+  onStarWithEpisode?: (id: string, seasonNumber: number, episodeNumber: number) => void;
+  /** Called when the user removes a cloud-only starred entry */
+  onUnstarCloud?: (mediaId: string) => void;
   onRefresh?: () => void;
   refreshing?: boolean;
   /** Pixels to pad the top of the scroll content so it clears the FloatingHeader */
@@ -63,8 +77,8 @@ interface LibraryViewProps {
 // ─── Sort options cycle ───────────────────────────────────────────────────────
 
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
-  { key: "lastPlayed", label: "Last Played" },
   { key: "added", label: "Recently Added" },
+  { key: "lastPlayed", label: "Last Played" },
   { key: "title", label: "Title A–Z" },
   { key: "rating", label: "Top Rated" },
   { key: "year", label: "Release Year" },
@@ -140,7 +154,7 @@ function GridCard({
           {/* Rating Badge */}
           <View style={styles.ratingBadge}>
             <Star size={9} color="#4ade80" fill="#4ade80" />
-            <Text style={styles.ratingBadgeText}>{item.rating.toFixed(1)}</Text>
+            <Text style={styles.ratingBadgeText}>{item.rating != null ? item.rating.toFixed(1) : '—'}</Text>
           </View>
 
           {/* Duration Badge */}
@@ -195,11 +209,13 @@ function ListCard({
   onDelete,
   onPress,
   onToggleStar,
+  showEpisodeBadge = false,
 }: {
   item: MediaItem;
   onDelete: () => void;
   onPress: () => void;
   onToggleStar?: () => void;
+  showEpisodeBadge?: boolean;
 }) {
   return (
     <Animated.View
@@ -248,7 +264,7 @@ function ListCard({
             </View>
             <View style={styles.ratingRow}>
               <Star size={10} color="#facc15" fill="#facc15" />
-              <Text style={styles.listRating}>{item.rating.toFixed(1)}</Text>
+              <Text style={styles.listRating}>{item.rating != null ? item.rating.toFixed(1) : '—'}</Text>
             </View>
             {item.type === 'movie' && item.runtime && (
               <View style={styles.ratingRow}>
@@ -279,6 +295,16 @@ function ListCard({
 
           {/* Description */}
           <Text style={styles.listDesc} numberOfLines={2}>{item.description}</Text>
+
+          {/* Last episode badge — TV only, starred tab only */}
+          {showEpisodeBadge && item.type === "tv" && item.starred && item.lastEpisode && (
+            <View style={styles.lastEpisodeBadge}>
+              <Tv2 size={10} color="#60a5fa" />
+              <Text style={styles.lastEpisodeText}>
+                S{item.lastEpisode.seasonNumber} · E{item.lastEpisode.episodeNumber}
+              </Text>
+            </View>
+          )}
         </View>
       </Pressable>
 
@@ -427,6 +453,322 @@ function RemoveConfirmSheet({
   );
 }
 
+// ─── Starred card (cloud-only) ────────────────────────────────────────────────
+
+/**
+ * Shown in the starred tab for items that came from the cloud but have no
+ * local file on this device. Info-only: no play button, no delete, no navigation.
+ * Shows all available metadata. Unstar button only.
+ *
+ * Supports both "list" (horizontal row) and "grid" (poster card) view modes
+ * to match the app's GridCard design when the user switches to grid view.
+ */
+function StarredCard({
+  entry,
+  onUnstar,
+  viewMode = 'list',
+}: {
+  entry: CloudStarredEntry;
+  onUnstar: () => void;
+  viewMode?: ViewMode;
+}) {
+  // ── Grid variant — mirrors GridCard layout ──────────────────────────────────
+  if (viewMode === 'grid') {
+    return (
+      <Animated.View
+        entering={FadeInDown.duration(350)}
+        exiting={FadeOutUp.duration(250)}
+        style={styles.gridCard}
+      >
+        <View style={styles.gridPosterWrap}>
+          <Image
+            source={entry.posterUrl ? { uri: entry.posterUrl } : undefined}
+            style={styles.gridPoster}
+            resizeMode="cover"
+          />
+
+          {/* Type pill */}
+          <View
+            style={[
+              styles.typePill,
+              styles.typePillAbsolute,
+              entry.type === 'movie' ? styles.moviePill : styles.tvPill,
+            ]}
+          >
+            {entry.type === 'movie'
+              ? <Film size={9} color="#f59e0b" />
+              : <Tv size={9} color="#60a5fa" />}
+            <Text
+              style={[
+                styles.typePillText,
+                entry.type === 'movie' ? styles.movieText : styles.tvText,
+              ]}
+            >
+              {entry.type === 'movie' ? 'Film' : 'TV'}
+            </Text>
+          </View>
+
+          {/* Rating badge */}
+          {entry.rating !== undefined && entry.rating > 0 && (
+            <View style={styles.ratingBadge}>
+              <Star size={9} color="#4ade80" fill="#4ade80" />
+              <Text style={styles.ratingBadgeText}>{entry.rating != null ? entry.rating.toFixed(1) : '—'}</Text>
+            </View>
+          )}
+
+          {/* Episode badge for TV — bottom-left overlay */}
+          {entry.type === 'tv' && entry.lastEpisode && (
+            <View style={styles.starredGridEpisodeBadge}>
+              <Tv2 size={9} color="#60a5fa" />
+              <Text style={styles.starredGridEpisodeText}>
+                S{entry.lastEpisode.seasonNumber}·E{entry.lastEpisode.episodeNumber}
+              </Text>
+            </View>
+          )}
+
+          {/* Unstar button */}
+          <Pressable onPress={onUnstar} style={styles.gridDeleteBtn} hitSlop={8}>
+            <StarIcon size={12} color="#facc15" fill="#facc15" />
+          </Pressable>
+        </View>
+
+        <Text style={styles.gridTitle} numberOfLines={2}>
+          {entry.title}
+        </Text>
+        {entry.releaseDate && (
+          <Text style={styles.gridYear}>{entry.releaseDate.split('-')[0]}</Text>
+        )}
+      </Animated.View>
+    );
+  }
+
+  // ── List variant (default) ──────────────────────────────────────────────────
+  return (
+    <Animated.View
+      entering={FadeInDown.duration(350)}
+      exiting={FadeOutUp.duration(250)}
+      style={styles.starredCard}
+    >
+      {/* Blurred backdrop */}
+      {(entry.backdropUrl || entry.posterUrl) && (
+        <Image
+          source={{ uri: entry.backdropUrl || entry.posterUrl }}
+          style={styles.starredBackdrop}
+          resizeMode="cover"
+          blurRadius={20}
+        />
+      )}
+      <LinearGradient
+        colors={['rgba(10,10,12,0.35)', 'rgba(10,10,12,0.92)']}
+        style={StyleSheet.absoluteFillObject}
+      />
+
+      {/* Non-interactive body — just layout, no Pressable */}
+      <View style={styles.starredPressable}>
+        {/* Poster */}
+        <View style={styles.starredPosterWrap}>
+          <Image
+            source={entry.posterUrl ? { uri: entry.posterUrl } : undefined}
+            style={styles.starredPoster}
+            resizeMode="cover"
+          />
+          {/* Starred badge on poster */}
+          <View style={styles.starredPosterBadge}>
+            <StarIcon size={11} color="#facc15" fill="#facc15" />
+          </View>
+        </View>
+
+        {/* Info */}
+        <View style={styles.starredInfo}>
+          {/* Title */}
+          <Text style={styles.starredTitle} numberOfLines={2}>
+            {entry.title}
+          </Text>
+
+          {/* Badges row */}
+          <View style={styles.starredBadgeRow}>
+            <View style={[styles.typePill, entry.type === 'movie' ? styles.moviePill : styles.tvPill]}>
+              {entry.type === 'movie'
+                ? <Film size={9} color="#f59e0b" />
+                : <Tv size={9} color="#60a5fa" />}
+              <Text style={[styles.typePillText, entry.type === 'movie' ? styles.movieText : styles.tvText]}>
+                {entry.type === 'movie' ? 'Movie' : 'TV'}
+              </Text>
+            </View>
+            {entry.rating !== undefined && entry.rating > 0 && (
+              <View style={styles.ratingRow}>
+                <Star size={10} color="#facc15" fill="#facc15" />
+                <Text style={styles.listRating}>{entry.rating != null ? entry.rating.toFixed(1) : '—'}</Text>
+              </View>
+            )}
+            {entry.releaseDate && (
+              <View style={styles.ratingRow}>
+                <Calendar size={10} color="#52525b" />
+                <Text style={styles.listYear}>{entry.releaseDate.split('-')[0]}</Text>
+              </View>
+            )}
+          </View>
+
+          {/* TV last-episode — prominent hero badge */}
+          {entry.type === 'tv' && entry.lastEpisode ? (
+            <View style={styles.starredEpisodeHero}>
+              <Tv2 size={12} color="#60a5fa" />
+              <Text style={styles.starredEpisodeHeroText}>
+                Up to  S{entry.lastEpisode.seasonNumber}  ·  E{entry.lastEpisode.episodeNumber}
+              </Text>
+            </View>
+          ) : entry.type === 'tv' && entry.numberOfSeasons ? (
+            <View style={styles.starredSeasonsBadge}>
+              <Tv size={10} color="#60a5fa" />
+              <Text style={styles.starredSeasonsText}>
+                {entry.numberOfSeasons} {entry.numberOfSeasons === 1 ? 'Season' : 'Seasons'}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+      </View>
+
+      {/* Unstar button */}
+      <View style={styles.starredActions}>
+        <Pressable onPress={onUnstar} style={styles.starredUnstarBtn} hitSlop={8}>
+          <StarIcon size={13} color="#facc15" fill="#facc15" />
+        </Pressable>
+      </View>
+    </Animated.View>
+  );
+}
+
+// ─── TV Episode Prompt ────────────────────────────────────────────────────────
+
+/**
+ * Shown when the user stars a TV show that isn't starred yet.
+ * Asks which season + episode they're up to so it can be saved and synced.
+ */
+function EpisodePrompt({
+  item,
+  onConfirm,
+  onSkip,
+}: {
+  item: MediaItem;
+  onConfirm: (seasonNumber: number, episodeNumber: number) => void;
+  onSkip: () => void;
+}) {
+  const [season, setSeason] = useState(
+    item.lastEpisode ? String(item.lastEpisode.seasonNumber) : "1",
+  );
+  const [episode, setEpisode] = useState(
+    item.lastEpisode ? String(item.lastEpisode.episodeNumber) : "",
+  );
+
+  const canConfirm = season.trim() !== "" && episode.trim() !== "";
+
+  const handleConfirm = () => {
+    const s = parseInt(season, 10);
+    const e = parseInt(episode, 10);
+    if (!isNaN(s) && !isNaN(e) && s > 0 && e > 0) {
+      onConfirm(s, e);
+    }
+  };
+
+  return (
+    <Modal
+      visible
+      transparent
+      animationType="fade"
+      onRequestClose={onSkip}
+      statusBarTranslucent
+    >
+      <Pressable style={styles.removeBackdrop} onPress={onSkip} />
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        style={styles.episodeKav}
+      >
+        <Animated.View entering={FadeIn.duration(220)} style={styles.episodeSheet}>
+          {(item.backdropUrl || item.posterUrl) && (
+            <Image
+              source={{ uri: item.backdropUrl || item.posterUrl }}
+              style={StyleSheet.absoluteFillObject}
+              blurRadius={22}
+            />
+          )}
+          <LinearGradient
+            colors={["rgba(10,10,12,0.45)", "rgba(10,10,12,0.97)"]}
+            style={StyleSheet.absoluteFillObject}
+          />
+
+          <View style={styles.episodeInner}>
+            {/* Icon */}
+            <View style={styles.episodeIconRing}>
+              <Tv2 size={26} color="#60a5fa" />
+            </View>
+
+            <Text style={styles.episodeTitle}>Where are you up to?</Text>
+
+            <Text style={styles.episodeSubtitle} numberOfLines={2}>
+              {item.title}
+            </Text>
+
+            <Text style={styles.episodeHint}>
+              We&apos;ll save this so you know where to continue on any device.
+            </Text>
+
+            {/* Season + Episode inputs */}
+            <View style={styles.episodeInputRow}>
+              <View style={styles.episodeInputWrap}>
+                <Text style={styles.episodeInputLabel}>Season</Text>
+                <TextInput
+                  style={styles.episodeInput}
+                  value={season}
+                  onChangeText={setSeason}
+                  keyboardType="number-pad"
+                  placeholder="1"
+                  placeholderTextColor="#52525b"
+                  maxLength={3}
+                  returnKeyType="next"
+                  selectTextOnFocus
+                />
+              </View>
+              <View style={styles.episodeSeparator} />
+              <View style={styles.episodeInputWrap}>
+                <Text style={styles.episodeInputLabel}>Episode</Text>
+                <TextInput
+                  style={styles.episodeInput}
+                  value={episode}
+                  onChangeText={setEpisode}
+                  keyboardType="number-pad"
+                  placeholder="1"
+                  placeholderTextColor="#52525b"
+                  maxLength={3}
+                  returnKeyType="done"
+                  onSubmitEditing={canConfirm ? handleConfirm : undefined}
+                  selectTextOnFocus
+                />
+              </View>
+            </View>
+
+            {/* Actions */}
+            <View style={styles.episodeActions}>
+              <Pressable style={[styles.episodeBtn, styles.episodeBtnSecondary]} onPress={onSkip}>
+                <Text style={styles.episodeBtnText}>Skip</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.episodeBtn, styles.episodeBtnPrimary, !canConfirm && styles.episodeBtnDisabled]}
+                onPress={handleConfirm}
+                disabled={!canConfirm}
+              >
+                <StarIcon size={14} color={canConfirm ? "#000000" : "#52525b"} fill={canConfirm ? "#000000" : "none"} />
+                <Text style={[styles.episodeBtnText, canConfirm && styles.episodeBtnPrimaryText]}>
+                  Save & Star
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </Animated.View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
 // ─── Empty state ──────────────────────────────────────────────────────────────
 
 function EmptyState({ isFiltered }: { isFiltered: boolean }) {
@@ -441,7 +783,7 @@ function EmptyState({ isFiltered }: { isFiltered: boolean }) {
       <Text style={styles.emptySubtext}>
         {isFiltered
           ? "Try a different filter."
-          : "Scan a video file from the Scanner tab to add titles here."}
+          : "Use the Scanner button to add titles here."}
       </Text>
     </Animated.View>
   );
@@ -451,8 +793,11 @@ function EmptyState({ isFiltered }: { isFiltered: boolean }) {
 
 export function LibraryView({
   items,
+  cloudStarredItems = [],
   onDelete,
   onToggleStar,
+  onStarWithEpisode,
+  onUnstarCloud,
   onRefresh,
   refreshing = false,
   headerOffset = 0,
@@ -460,6 +805,8 @@ export function LibraryView({
   onSettingsPress,
 }: LibraryViewProps) {
   const navigation = useNavigation<NavigationProp>();
+  const insets = useSafeAreaInsets();
+  const { account } = useAccount();
   const [filter, setFilter] = useState<FilterTab>("all");
   const [sortIdx, setSortIdx] = useState(0);
   const [viewMode, setViewMode] = useState<ViewMode>("list");
@@ -469,16 +816,19 @@ export function LibraryView({
   const [removeTarget, setRemoveTarget] = useState<MediaItem | null>(null);
   const [removePhase, setRemovePhase] = useState<"confirm" | "done">("confirm");
 
+  /** Episode prompt — shown when starring a TV show */
+  const [episodePromptItem, setEpisodePromptItem] = useState<MediaItem | null>(null);
+
   /** Track last played timestamps for sorting */
   const [lastPlayedMap, setLastPlayedMap] = useState<Record<string, string | null>>({});
 
   const sortKey = SORT_OPTIONS[sortIdx].key;
   const sortLabel = SORT_OPTIONS[sortIdx].label;
 
-  // Fetch lastPlayedAt timestamps when items change or sort changes to lastPlayed
+  // Fetch lastPlayedAt timestamps when items change and subscribe to progress updates
   useEffect(() => {
-    if (sortKey !== 'lastPlayed') return;
-    
+    let mounted = true;
+
     const fetchLastPlayed = async () => {
       const map: Record<string, string | null> = {};
       await Promise.all(
@@ -488,15 +838,49 @@ export function LibraryView({
           map[item.id] = lastPlayed;
         })
       );
-      setLastPlayedMap(map);
+      if (mounted) setLastPlayedMap(map);
     };
 
     void fetchLastPlayed();
-  }, [items, sortKey]);
+
+    // Refresh when any progress changes (markAsPlayed / save / clear)
+    setOnProgressChanged(() => {
+      void fetchLastPlayed();
+    });
+
+    return () => {
+      mounted = false;
+      setOnProgressChanged(null);
+    };
+  }, [items]);
 
   const handleDetails = (item: MediaItem) => {
     console.log(`LibraryView: Navigating to Details for: ${item.title} (ID: ${item.id})`);
     navigation.navigate("Details", { item });
+  };
+
+  /**
+   * Called when the user taps the star on any card.
+   * - Movies and already-starred TV shows → direct toggle.
+   * - Un-starred TV shows → open episode prompt first.
+   */
+  const handleStarPress = (item: MediaItem) => {
+    if (!onToggleStar) return;
+
+    // Un-starring always works immediately regardless of type
+    if (item.starred) {
+      onToggleStar(item.id);
+      return;
+    }
+
+    // Starring a TV show → ask for episode first
+    if (item.type === "tv" && onStarWithEpisode) {
+      setEpisodePromptItem(item);
+      return;
+    }
+
+    // Movie (or TV when onStarWithEpisode not provided) → direct toggle
+    onToggleStar(item.id);
   };
 
   const handlePlay = (item: MediaItem) => {
@@ -512,7 +896,20 @@ export function LibraryView({
   });
 
   // ── Derived list ────────────────────────────────────────────────────────────
-  const visible = useMemo(() => {
+  // When the starred tab is active, we append cloud-only entries at the end.
+  // We use a discriminated wrapper so renderItem can branch on type.
+  type ListRow =
+    | { kind: 'media'; item: MediaItem }
+    | { kind: 'cloud'; entry: CloudStarredEntry };
+
+  // Map item id -> index in the incoming items array (assumed to reflect added order)
+  const addedIndex = useMemo(() => {
+    const m: Record<string, number> = {};
+    items.forEach((it, idx) => { m[it.id] = idx; });
+    return m;
+  }, [items]);
+
+  const visible = useMemo((): ListRow[] => {
     let list = items;
 
     if (filter === "starred") {
@@ -521,28 +918,58 @@ export function LibraryView({
       list = list.filter((i) => i.type === filter);
     }
 
-    return [...list].sort((a, b) => {
+    const sorted = [...list].sort((a, b) => {
       if (sortKey === "title") return a.title.localeCompare(b.title);
       if (sortKey === "rating") return b.rating - a.rating;
       if (sortKey === "year")
         return (b.releaseDate ?? "").localeCompare(a.releaseDate ?? "");
+
       if (sortKey === "lastPlayed") {
         const aPlayed = lastPlayedMap[a.id];
         const bPlayed = lastPlayedMap[b.id];
-        // Items with no play history go to the end
         if (!aPlayed && !bPlayed) return 0;
         if (!aPlayed) return 1;
         if (!bPlayed) return -1;
-        // Most recent first
         return bPlayed.localeCompare(aPlayed);
       }
-      return 0; // 'added' — already newest-first from context
+
+      // Default (added / recently added):
+      // 1) Items with a recent lastPlayedAt should float to the top (most recent first)
+      // 2) Otherwise fall back to incoming items order (assumed added order) with newest first
+      const aPlayed = lastPlayedMap[a.id];
+      const bPlayed = lastPlayedMap[b.id];
+      if (aPlayed || bPlayed) {
+        if (!aPlayed) return 1;
+        if (!bPlayed) return -1;
+        const cmp = bPlayed.localeCompare(aPlayed);
+        if (cmp !== 0) return cmp;
+      }
+
+      const aIdx = addedIndex[a.id] ?? 0;
+      const bIdx = addedIndex[b.id] ?? 0;
+      return bIdx - aIdx;
     });
-  }, [items, filter, sortKey, lastPlayedMap]);
+
+    const mediaRows: ListRow[] = sorted.map((item) => ({ kind: 'media', item }));
+
+    // Append cloud-only entries only in the starred tab
+    // Filter out entries that already exist in the local library (as starred items)
+    if (filter === "starred" && cloudStarredItems.length > 0) {
+      const localIds = new Set(items.map((i) => i.id));
+      const cloudOnlyEntries = cloudStarredItems.filter((e) => !localIds.has(e.mediaId));
+      const cloudRows: ListRow[] = cloudOnlyEntries.map((entry) => ({
+        kind: 'cloud',
+        entry,
+      }));
+      return [...mediaRows, ...cloudRows];
+    }
+
+    return mediaRows;
+  }, [items, cloudStarredItems, filter, sortKey, lastPlayedMap, addedIndex]);
 
   const movies = items.filter((i) => i.type === "movie").length;
   const tvShows = items.filter((i) => i.type === "tv").length;
-  const starredCount = items.filter((i) => i.starred).length;
+  const starredCount = items.filter((i) => i.starred).length + cloudStarredItems.length;
   const isFiltered = filter !== "all";
 
   // ── List header (stats + controls) ──────────────────────────────────────────
@@ -650,7 +1077,9 @@ export function LibraryView({
       <Animated.FlatList
         data={visible}
         key={viewMode}
-        keyExtractor={(item) => item.id}
+        keyExtractor={(row) =>
+          row.kind === 'media' ? row.item.id : `cloud:${row.entry.mediaId}`
+        }
         numColumns={viewMode === "grid" ? 2 : 1}
         columnWrapperStyle={viewMode === "grid" ? styles.gridRow : undefined}
         ListHeaderComponent={<ListHeader />}
@@ -674,8 +1103,46 @@ export function LibraryView({
           viewMode === "grid" ? styles.gridContent : styles.listContent,
           { paddingTop: headerOffset + 8, paddingHorizontal: 24 },
         ]}
-        renderItem={({ item }) =>
-          viewMode === "grid" ? (
+        renderItem={({ item: row }) => {
+          if (row.kind === 'cloud') {
+            return (
+              <StarredCard
+                entry={row.entry}
+                onUnstar={() => onUnstarCloud?.(row.entry.mediaId)}
+                viewMode={viewMode}
+              />
+            );
+          }
+
+          const item = row.item;
+
+          // Local starred items in the starred tab → StarredCard (info-only view)
+          if (filter === 'starred' && item.starred) {
+            const entry: CloudStarredEntry = {
+              mediaId: item.id,
+              title: item.title,
+              type: item.type,
+              posterUrl: item.posterUrl,
+              backdropUrl: item.backdropUrl,
+              rating: item.rating,
+              releaseDate: item.releaseDate,
+              genres: item.genres,
+              description: item.description,
+              numberOfSeasons: item.numberOfSeasons,
+              lastEpisode: item.lastEpisode,
+              updatedAt: new Date().toISOString(),
+            };
+            return (
+              <StarredCard
+                entry={entry}
+                onUnstar={() => onToggleStar?.(item.id)}
+                viewMode={viewMode}
+              />
+            );
+          }
+
+          // All other tabs → normal grid/list card with play + delete
+          return viewMode === "grid" ? (
             <GridCard
               item={item}
               onDelete={() => {
@@ -683,7 +1150,7 @@ export function LibraryView({
                 setRemoveTarget(item);
               }}
               onPress={() => handlePlay(item)}
-              onToggleStar={onToggleStar ? () => onToggleStar(item.id) : undefined}
+              onToggleStar={onToggleStar ? () => handleStarPress(item) : undefined}
             />
           ) : (
             <ListCard
@@ -693,10 +1160,11 @@ export function LibraryView({
                 setRemoveTarget(item);
               }}
               onPress={() => handlePlay(item)}
-              onToggleStar={onToggleStar ? () => onToggleStar(item.id) : undefined}
+              onToggleStar={onToggleStar ? () => handleStarPress(item) : undefined}
+              showEpisodeBadge={filter === 'starred'}
             />
-          )
-        }
+          );
+        }}
       />
       <FloatingHeader
         title="Library"
@@ -722,6 +1190,22 @@ export function LibraryView({
           onDone={() => {
             setRemoveTarget(null);
             setRemovePhase("confirm");
+          }}
+        />
+      )}
+
+      {/* TV episode prompt — shown when starring an un-starred TV show */}
+      {episodePromptItem && (
+        <EpisodePrompt
+          item={episodePromptItem}
+          onConfirm={(seasonNumber, episodeNumber) => {
+            onStarWithEpisode?.(episodePromptItem.id, seasonNumber, episodeNumber);
+            setEpisodePromptItem(null);
+          }}
+          onSkip={() => {
+            // Star without episode info
+            onToggleStar?.(episodePromptItem.id);
+            setEpisodePromptItem(null);
           }}
         />
       )}
@@ -814,7 +1298,7 @@ const styles = StyleSheet.create({
   },
 
   // ── Grid ──────────────────────────────────────────────────────────────────────
-  gridContent: { paddingBottom: 90 },
+  gridContent: { paddingBottom: 140 },
   gridRow: { gap: 12, marginBottom: 12 },
 
   gridCard: { width: GRID_ITEM_WIDTH },
@@ -947,7 +1431,7 @@ const styles = StyleSheet.create({
   gridRating: { fontSize: 11, fontWeight: "600", color: "#a1a1aa" },
 
   // ── List ──────────────────────────────────────────────────────────────────────
-  listContent: { gap: 12, paddingBottom: 90 },
+  listContent: { gap: 12, paddingBottom: 140 },
 
   listCard: {
     flexDirection: "row",
@@ -1195,4 +1679,315 @@ const styles = StyleSheet.create({
   removeBtnDangerText: {
     color: "#f87171",
   },
+
+  // ── Last episode badge (list card) ────────────────────────────────────────────
+  lastEpisodeBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    alignSelf: "flex-start",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 7,
+    backgroundColor: "rgba(96,165,250,0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(96,165,250,0.25)",
+    marginTop: 2,
+  },
+  lastEpisodeText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#60a5fa",
+    letterSpacing: 0.3,
+  },
+
+  // ── Episode prompt modal ──────────────────────────────────────────────────────
+  episodeKav: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  episodeSheet: {
+    width: "88%",
+    borderRadius: 28,
+    overflow: "hidden",
+    backgroundColor: "#111113",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+  },
+  episodeInner: {
+    padding: 28,
+    alignItems: "center",
+    gap: 12,
+  },
+  episodeIconRing: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: "rgba(96,165,250,0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(96,165,250,0.3)",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 4,
+  },
+  episodeTitle: {
+    fontSize: 20,
+    fontWeight: "800",
+    color: "#ffffff",
+    letterSpacing: -0.4,
+    textAlign: "center",
+  },
+  episodeSubtitle: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#a1a1aa",
+    textAlign: "center",
+  },
+  episodeHint: {
+    fontSize: 13,
+    color: "#52525b",
+    textAlign: "center",
+    lineHeight: 19,
+    paddingHorizontal: 8,
+  },
+  episodeInputRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    width: "100%",
+    gap: 12,
+    marginTop: 4,
+  },
+  episodeInputWrap: {
+    flex: 1,
+    gap: 6,
+  },
+  episodeInputLabel: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#52525b",
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
+    textAlign: "center",
+  },
+  episodeInput: {
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    fontSize: 22,
+    fontWeight: "800",
+    color: "#ffffff",
+    textAlign: "center",
+  },
+  episodeSeparator: {
+    width: 1,
+    height: 40,
+    backgroundColor: "rgba(255,255,255,0.08)",
+    marginTop: 22,
+  },
+  episodeActions: {
+    flexDirection: "row",
+    width: "100%",
+    gap: 10,
+    marginTop: 4,
+  },
+  episodeBtn: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 14,
+    borderRadius: 14,
+    backgroundColor: "rgba(255,255,255,0.07)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+  },
+  episodeBtnSecondary: {},
+  episodeBtnPrimary: {
+    backgroundColor: "#facc15",
+    borderColor: "#facc15",
+  },
+  episodeBtnDisabled: {
+    backgroundColor: "rgba(255,255,255,0.05)",
+    borderColor: "rgba(255,255,255,0.07)",
+  },
+  episodeBtnText: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#ffffff",
+  },
+  episodeBtnPrimaryText: {
+    color: "#000000",
+  },
+
+  // ── Starred card (cloud-only) ─────────────────────────────────────────────────
+  starredCard: {
+    flexDirection: "row",
+    backgroundColor: "#0d0d10",
+    borderRadius: 20,
+    overflow: "hidden",
+    padding: 14,
+    gap: 14,
+    alignItems: "flex-start",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    elevation: 6,
+  },
+  starredTopBorder: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 2,
+    backgroundColor: "rgba(250,204,21,0.45)",
+  },
+  starredBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    opacity: 0.14,
+  },
+  starredPressable: {
+    flex: 1,
+    flexDirection: "row",
+    gap: 14,
+    zIndex: 1,
+  },
+  starredPosterWrap: {
+    width: 76,
+    height: 112,
+    borderRadius: 12,
+    overflow: "hidden",
+    backgroundColor: "#27272a",
+    flexShrink: 0,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  starredPoster: {
+    width: 76,
+    height: 112,
+    borderRadius: 12,
+    backgroundColor: "#27272a",
+  },
+  starredPosterBadge: {
+    position: "absolute",
+    top: 5,
+    right: 5,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: "rgba(250,204,21,0.2)",
+    borderWidth: 1,
+    borderColor: "rgba(250,204,21,0.45)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  starredInfo: {
+    flex: 1,
+    gap: 6,
+    justifyContent: "center",
+  },
+  starredTitle: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: "#ffffff",
+    letterSpacing: -0.4,
+    lineHeight: 20,
+  },
+  starredBadgeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    flexWrap: "wrap",
+  },
+  starredEpisodeHero: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    alignSelf: "flex-start",
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 9,
+    backgroundColor: "rgba(96,165,250,0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(96,165,250,0.3)",
+    marginTop: 2,
+  },
+  starredEpisodeHeroText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#60a5fa",
+    letterSpacing: 0.4,
+  },
+  starredSeasonsBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    alignSelf: "flex-start",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 7,
+    backgroundColor: "rgba(96,165,250,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(96,165,250,0.2)",
+    marginTop: 2,
+  },
+  starredSeasonsText: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: "#60a5fa",
+  },
+  starredActions: {
+    zIndex: 1,
+    alignItems: "center",
+    justifyContent: "flex-start",
+    paddingTop: 2,
+  },
+  starredUnstarBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 9,
+    backgroundColor: "rgba(250,204,21,0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(250,204,21,0.28)",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+  },
+
+  // Wraps StarredCard in grid mode so it spans both columns at full width
+  starredGridWrap: {
+    width: SCREEN_WIDTH - 48, // full content width (matches paddingHorizontal: 24 on each side)
+    marginBottom: 12,
+  },
+
+  // ── Starred grid card overlays ────────────────────────────────────────────────
+  starredGridEpisodeBadge: {
+    position: "absolute",
+    bottom: 8,
+    left: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 9999,
+    backgroundColor: "rgba(0,0,0,0.65)",
+    borderWidth: 1,
+    borderColor: "rgba(96,165,250,0.35)",
+  },
+  starredGridEpisodeText: {
+    fontSize: 9,
+    fontWeight: "800",
+    color: "#60a5fa",
+    letterSpacing: 0.2,
+  },
+
 });

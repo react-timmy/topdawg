@@ -1,108 +1,34 @@
 /**
  * Gemini AI Service — Batch Filename Parser
  *
- * Uses the @google/genai SDK with the Gemma 4 31B model via the Gemini API.
- * Automatically falls back to gemma-4-26b-a4b-it on quota errors (429).
+ * Gemini calls now route through the Cloudflare Worker proxy.
+ * The API key never ships in the app bundle — it lives in Cloudflare Secrets.
  *
  * Key lanes:
- *   Free  — rotates GEMINI_API_KEYS; when all are cooling down, waits ~60s (queue UI)
- *   Pro   — dedicated GEMINI_PRO_API_KEY ("Skip the Line"); never shared with free users
+ *   Free — worker uses GEMINI_API_KEY secret
+ *   Pro  — worker uses GEMINI_PRO_API_KEY secret (isPro: true in request body)
  *
- * Fast path:
+ * Fast path (unchanged):
  *   1. Cache hits (instant)
- *   2. High-confidence local parse (AnimePahe / YTS / scene names) — no API
- *   3. Gemini batch for the rest (progress callbacks keep UI alive)
+ *   2. High-confidence local parse — no network call at all
+ *   3. Proxy batch for the rest (progress callbacks keep UI alive)
  */
 
-import { GoogleGenAI } from '@google/genai';
 import { resolveIsAnime } from '../utils/mediaHints';
 import { parseLocalFilename } from '../utils/localFilenameParser';
 import { sourcesForPrompt } from '../utils/releaseSources';
-import {
-  GEMINI_API_KEYS,
-  GEMINI_MODELS,
-  GEMINI_PRO_API_KEY,
-} from '../config/env';
+import { GEMINI_MODELS } from '../config/env';
 import { bulkGetCached, bulkSetCached } from '../storage/aiParseCache';
+import { proxyFetch, isProxyAvailable, ProxyError } from './proxyClient';
 
-const KEY_COOLDOWN_MS = 60_000;
+// ── Types ──────────────────────────────────────────────────────────────────────
 
 type KeyLane = 'free' | 'pro';
 
-class KeyManager {
-  private freeKeys = GEMINI_API_KEYS;
-  private proKey = GEMINI_PRO_API_KEY;
-  private exhaustTimes = new Map<string, number>();
-
-  /** Pro VIP key when set; otherwise free pool (dev / single-key setups). */
-  private pool(isPro: boolean): { keys: string[]; lane: KeyLane } {
-    if (isPro && this.proKey) {
-      return { keys: [this.proKey], lane: 'pro' };
-    }
-    return { keys: this.freeKeys, lane: 'free' };
-  }
-
-  async getAvailableKey(
-    isPro: boolean,
-    onQueue?: (lane: KeyLane) => void,
-  ): Promise<{ key: string; lane: KeyLane }> {
-    const { keys, lane } = this.pool(isPro);
-    if (keys.length === 0) {
-      throw new Error(
-        isPro
-          ? 'No Gemini keys configured (set GEMINI_PRO_API_KEY or GEMINI_API_KEY)!'
-          : 'No Gemini free-tier keys configured!',
-      );
-    }
-
-    while (true) {
-      const now = Date.now();
-      let minWait = Infinity;
-
-      for (const key of keys) {
-        const exhaustedUntil = this.exhaustTimes.get(key) || 0;
-        if (now >= exhaustedUntil) {
-          return { key, lane };
-        }
-        const waitTime = exhaustedUntil - now;
-        if (waitTime < minWait) minWait = waitTime;
-      }
-
-      onQueue?.(lane);
-      const waitSec = Math.ceil(minWait / 1000);
-      console.log(
-        `[Queue System] ${lane === 'pro' ? 'Pro VIP' : 'Free'} lane exhausted. Waiting ${waitSec}s…`,
-      );
-      await new Promise((resolve) => setTimeout(resolve, Math.max(minWait, 250)));
-    }
-  }
-
-  markExhausted(key: string) {
-    console.warn(
-      `[Queue System] Key ending in …${key.slice(-4)} rate-limited. Cooling down for ${KEY_COOLDOWN_MS / 1000}s.`,
-    );
-    this.exhaustTimes.set(key, Date.now() + KEY_COOLDOWN_MS);
-  }
-}
-
-const keyManager = new KeyManager();
-
-function isQuotaError(error: unknown): boolean {
-  const err = error as { status?: number; statusCode?: number; code?: number | string; message?: string };
-  const status = err?.status ?? err?.statusCode ?? err?.code;
-  const msg = String(err?.message ?? error ?? '').toLowerCase();
-  return (
-    status === 429 ||
-    msg.includes('quota') ||
-    msg.includes('rate limit') ||
-    msg.includes('resource_exhausted')
-  );
-}
-
 export type GeminiCallOptions = {
-  /** When true, prefer the Pro VIP key (Skip the Line). */
+  /** When true, the proxy uses the Pro VIP key (Skip the Line). */
   isPro?: boolean;
-  /** Fired while waiting for a cool-down key (free queue or Pro VIP retry). */
+  /** Fired while the proxy is rate-limited and we're waiting to retry. */
   onQueue?: (lane: KeyLane) => void;
 };
 
@@ -115,70 +41,61 @@ type GenerateContentParams = GeminiCallOptions & {
 };
 
 /**
- * Shared Gemini call: key rotation + model fallback + 429 cooldown.
- * Returns response text, or null if all attempts fail.
+ * Calls the Cloudflare Worker Gemini proxy.
+ * Retries up to 3 times on 429 with exponential back-off.
+ * Returns response text or null on failure.
  */
 async function generateContentWithKeys(
   params: GenerateContentParams,
 ): Promise<string | null> {
   const isPro = params.isPro === true;
-  let lastError: unknown;
+  const lane: KeyLane = isPro ? 'pro' : 'free';
 
-  // Bound retries so we never spin forever if something odd happens
-  for (let attempt = 0; attempt < 12; attempt++) {
-    const { key, lane } = await keyManager.getAvailableKey(isPro, params.onQueue);
-    const ai = new GoogleGenAI({ apiKey: key });
-    let quotaOnThisKey = false;
+  if (!isProxyAvailable()) {
+    console.warn('[GeminiAI] Proxy not available — user not signed in');
+    return null;
+  }
 
-    for (const model of GEMINI_MODELS) {
-      try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: params.contents,
-          config: {
-            ...(params.systemInstruction
-              ? { systemInstruction: params.systemInstruction }
-              : {}),
-            temperature: params.temperature ?? 0.1,
-            maxOutputTokens: params.maxOutputTokens ?? 2048,
-            ...(params.responseMimeType
-              ? { responseMimeType: params.responseMimeType }
-              : {}),
-          },
-        });
+  const MAX_ATTEMPTS = 4;
+  const BASE_WAIT_MS = 15_000; // 15s base for 429 back-off
 
-        const content = response.text?.trim() ?? '';
-        if (content) {
-          if (model !== GEMINI_MODELS[0]) {
-            console.log(`[GeminiAI] Used fallback model: ${model} (${lane} lane)`);
-          }
-          return content;
-        }
-        console.warn(`[GeminiAI] Empty response from ${model} (${lane})`);
-      } catch (error: unknown) {
-        lastError = error;
-        if (isQuotaError(error)) {
-          console.warn(
-            `[GeminiAI] ${model} quota on key …${key.slice(-4)} (${lane}) — rotating`,
-          );
-          keyManager.markExhausted(key);
-          quotaOnThisKey = true;
-          break; // next key / wait
-        }
-        console.error(`[GeminiAI] Request failed (${model}):`, error);
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    try {
+      const result = await proxyFetch<{ text: string }>('gemini', {
+        contents: params.contents,
+        ...(params.systemInstruction ? { systemInstruction: params.systemInstruction } : {}),
+        temperature: params.temperature ?? 0.1,
+        maxOutputTokens: params.maxOutputTokens ?? 2048,
+        ...(params.responseMimeType ? { responseMimeType: params.responseMimeType } : {}),
+        isPro,
+      });
+
+      return result.text ?? null;
+    } catch (err) {
+      const isRateLimit =
+        err instanceof ProxyError && (err.status === 429 || err.status === 503);
+
+      if (isRateLimit && attempt < MAX_ATTEMPTS - 1) {
+        const wait = BASE_WAIT_MS * (attempt + 1);
+        console.warn(
+          `[GeminiAI] Proxy rate-limited (${lane}). Waiting ${Math.ceil(wait / 1000)}s… (attempt ${attempt + 1})`,
+        );
+        params.onQueue?.(lane);
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
+
+      if (err instanceof ProxyError && err.status === 401) {
+        console.warn('[GeminiAI] Proxy 401 — user not authenticated');
         return null;
       }
-    }
 
-    if (!quotaOnThisKey) {
-      // Empty responses across models, not a rate-limit — stop
-      break;
+      console.error('[GeminiAI] Proxy request failed:', err);
+      return null;
     }
   }
 
-  if (lastError) {
-    console.error('[GeminiAI] All keys/models exhausted. Last error:', lastError);
-  }
+  console.error('[GeminiAI] All proxy attempts exhausted');
   return null;
 }
 
@@ -241,13 +158,14 @@ RULES:
 5. season/episode: S##E## or S##EP## → both. "- ##" anime (no S) → season=1, episode=##. EP## alone → season=1.
 6. year: 4-digit 1888-2030, prefer parens, skip if part of title.
 7. confidence: 1.0=perfect, 0.9=clear, 0.7-0.8=good, 0.5-0.6=weak, 0.2-0.4=bare.
-8. isAnime=true ONLY from filename signals (anime sites/groups, Eng Dub + episode, [1080p] fansub style). isAnime=false for Western tags (Netflix, NF, AMZN, YTS, RARBG, …). NEVER set isAnime from title recognition alone.
+8. isAnime=true if the filename contains anime signals (anime sites/groups, Eng Dub, fansubs) OR if the title is a widely known anime (e.g. Solo Leveling, Naruto). isAnime=false for Western tags.
 9. Never put year/season/episode/quality/codec in the title. Numbered sequels are movies (Rocky IV). Resolutions are not episodes (1080p ≠ 1080).
 
 Known sources (strip these from titles):
 ${sourcesForPrompt()}
 
 EXAMPLES:
+SoloLeveling_Season2_EP7 → {"title":"Solo Leveling","type":"tv","season":2,"episode":7,"year":null,"confidence":0.9,"isAnime":true}
 AnimePahe_Dandadan_Eng_Dub_-_07_BD_360p_CRUCiBLE.mp4 → {"title":"Dandadan","type":"tv","season":1,"episode":7,"year":null,"confidence":0.9,"isAnime":true}
 [SubsPlease] Frieren - 18 (1080p).mkv → {"title":"Frieren","type":"tv","season":1,"episode":18,"year":null,"confidence":0.95,"isAnime":true}
 The.Matrix.1999.1080p.BluRay.x264-[YTS.MX].mkv → {"title":"The Matrix","type":"movie","season":null,"episode":null,"year":1999,"confidence":1.0,"isAnime":false}

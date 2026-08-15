@@ -13,7 +13,6 @@ import {
   Text,
   Pressable,
   StyleSheet,
-  ActivityIndicator,
   ScrollView,
   LayoutAnimation,
   Platform,
@@ -30,15 +29,21 @@ import {
   Rocket,
   ChevronDown,
   ChevronUp,
+  Bell,
 } from 'lucide-react-native';
-import { FREE_SCAN_LIMIT, setPro } from '../storage/proStatusService';
+import { FREE_SCAN_LIMIT } from '../storage/proStatusService';
 import { usePro } from '../context/ProContext';
+import { ProCodeModal } from './ProCodeModal';
 
-if (
-  Platform.OS === 'android' &&
-  UIManager.setLayoutAnimationEnabledExperimental
-) {
-  UIManager.setLayoutAnimationEnabledExperimental(true);
+// LayoutAnimation experimental toggle is a no-op under the New Architecture.
+// Keep safe guard for older RN but avoid logging the warning: only call when
+// the function exists and the runtime indicates support.
+try {
+  if (Platform.OS === 'android' && typeof UIManager.setLayoutAnimationEnabledExperimental === 'function') {
+    UIManager.setLayoutAnimationEnabledExperimental(true);
+  }
+} catch (e) {
+  // ignore - no-op on new architecture
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -54,6 +59,7 @@ type FeatureId =
   | 'folders'
   | 'unlimited'
   | 'wrapped'
+  | 'notifications'
   | 'future';
 
 type FeatureDef = {
@@ -128,13 +134,28 @@ const PRO_FEATURES: FeatureDef[] = [
     ],
   },
   {
+    id: 'notifications',
+    title: 'Advanced Release Alerts',
+    summary: 'Get notified about new seasons & episodes',
+    color: '#f59e0b',
+    Icon: Bell,
+    detail:
+      'Everyone gets streak reminders and basic alerts. Pro users get advanced notifications: automatic new season alerts for shows in your library, streaming availability updates for starred items, and early access to new notification features.',
+    bullets: [
+      'New season alerts for your library shows (Pro)',
+      'Streaming availability for starred items (Pro)',
+      'Priority notification queue (Pro)',
+      'Free: streak reminders + basic in-app alerts',
+    ],
+  },
+  {
     id: 'future',
     title: 'All future Pro features',
     summary: 'Everything we ship next',
     color: '#c4b5fd',
     Icon: Sparkles,
     detail:
-      'Pro is your seat for what comes next — new tools land for Pro first. Unlock once and you stay covered as FilmSort grows (cloud extras, smarter matching, and more).',
+      'Pro is your seat for what comes next — new tools land for Pro first. Unlock once and you stay covered as FilmSort grows (smart recommendations, cloud extras, and more).',
     bullets: [
       'New Pro tools as we release them',
       'No extra unlock steps for listed Pro perks',
@@ -152,8 +173,8 @@ export function ProPaywallModal({
 }: ProPaywallModalProps) {
   const insets = useSafeAreaInsets();
   const { refreshPro, scansUsed } = usePro();
-  const [purchasing, setPurchasing] = useState(false);
   const [expandedId, setExpandedId] = useState<FeatureId | null>(null);
+  const [codeModalOpen, setCodeModalOpen] = useState(false);
 
   useEffect(() => {
     if (!visible) setExpandedId(null);
@@ -167,15 +188,10 @@ export function ProPaywallModal({
     return [open];
   }, [expandedId]);
 
-  const handleUnlock = async () => {
-    setPurchasing(true);
-    try {
-      await setPro();
-      await refreshPro();
-      onPurchaseSuccess();
-    } finally {
-      setPurchasing(false);
-    }
+  const handleCodeSuccess = async () => {
+    await refreshPro();
+    onPurchaseSuccess();
+    setCodeModalOpen(false);
   };
 
   const toggleFeature = (id: FeatureId) => {
@@ -283,23 +299,21 @@ export function ProPaywallModal({
           </ScrollView>
 
           <Pressable
-            style={[styles.unlockBtn, purchasing && styles.btnDisabled]}
-            onPress={handleUnlock}
-            disabled={purchasing}
+            style={styles.unlockBtn}
+            onPress={() => setCodeModalOpen(true)}
             accessibilityRole="button"
-            accessibilityLabel="Unlock Pro"
+            accessibilityLabel="Enter Pro code"
           >
-            {purchasing ? (
-              <ActivityIndicator color="#000000" size="small" />
-            ) : (
-              <>
-                <CheckCircle2 size={18} color="#000000" strokeWidth={2.5} />
-                <Text style={styles.unlockBtnText}>Unlock Pro — Free</Text>
-              </>
-            )}
+            <CheckCircle2 size={18} color="#3f3f3fff" strokeWidth={2.5} />
+            <Text style={styles.unlockBtnText}>Enter Pro Code</Text>
           </Pressable>
         </View>
       </View>
+      <ProCodeModal
+        visible={codeModalOpen}
+        onClose={() => setCodeModalOpen(false)}
+        onSuccess={handleCodeSuccess}
+      />
     </Modal>
   );
 }
@@ -478,8 +492,5 @@ const styles = StyleSheet.create({
     color: '#000000',
     fontSize: 16,
     fontWeight: '900',
-  },
-  btnDisabled: {
-    opacity: 0.5,
   },
 });

@@ -22,7 +22,6 @@ import {
   CalendarClock,
   BellOff,
   Clapperboard,
-  Gift,
 } from 'lucide-react-native';
 import Animated, {
   FadeIn,
@@ -43,7 +42,6 @@ import {
 import { UpcomingCard } from '../components/UpcomingCard';
 import { storageService } from '../storage/asyncStorage';
 import { tmdbService } from '../services/tmdbService';
-import { useBadgeUnlock } from '../context/BadgeUnlockContext';
 
 type TabKey = 'inbox' | 'upcoming';
 
@@ -268,7 +266,6 @@ export function NotificationsScreen() {
   const route = useRoute<RouteProp<RootStackParamList, 'Notifications'>>();
   const insets = useSafeAreaInsets();
   const { notifications, markAllRead } = useNotifications();
-  const { savedBadges, openSaved } = useBadgeUnlock();
 
   const [tab, setTab] = useState<TabKey>(route.params?.initialTab ?? 'inbox');
 
@@ -401,34 +398,6 @@ export function NotificationsScreen() {
         {/* ── Inbox ─────────────────────────────────────────────────── */}
         {tab === 'inbox' && (
           <>
-            {/* Saved (snoozed) badge gifts */}
-            {savedBadges.length > 0 && (
-              <Animated.View entering={FadeInDown.delay(0).duration(280)} style={styles.badgeGiftsCard}>
-                <View style={styles.badgeGiftsHeader}>
-                  <Gift size={15} color="#f59e0b" strokeWidth={2} />
-                  <Text style={styles.badgeGiftsTitle}>Unclaimed Badges</Text>
-                  <View style={styles.badgeGiftsPill}>
-                    <Text style={styles.badgeGiftsPillText}>{savedBadges.length}</Text>
-                  </View>
-                </View>
-                <Text style={styles.badgeGiftsHint}>Tap a gift to open your achievement</Text>
-                <View style={styles.badgeGiftsRow}>
-                  {savedBadges.map((badge) => (
-                    <Pressable
-                      key={badge.id}
-                      style={({ pressed }) => [styles.badgeGiftItem, pressed && { opacity: 0.65 }]}
-                      onPress={() => openSaved(badge.id)}
-                    >
-                      <View style={[styles.badgeGiftIcon, { borderColor: badge.color, shadowColor: badge.color }]}>
-                        <Gift size={22} color={badge.color} strokeWidth={1.8} />
-                      </View>
-                      <Text style={styles.badgeGiftLabel} numberOfLines={1}>{badge.name}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-              </Animated.View>
-            )}
-
             {notifications.length === 0 ? (
               <InboxEmpty />
             ) : (

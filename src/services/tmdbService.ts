@@ -1,11 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MediaItem, EpisodeInfo, UpcomingItem, WatchProvider, SupportedPlatform } from '../types';
-import { TMDB_API_KEY } from '../config/env';
+import { proxyFetch } from './proxyClient';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-// API key is read from src/config/env.ts → app.json extra.
-// To rotate: update .env and app.json, then rebuild.
-const BASE_URL = 'https://api.themoviedb.org/3';
+// TMDB calls go through the Cloudflare Worker proxy — the API key lives server-side.
+// Image CDN URLs are built directly (no key required for images).
 const IMG_BASE = 'https://image.tmdb.org/t/p';
 
 const CACHE_PREFIX = '@cinescan:cache:tmdb:';
@@ -99,50 +98,49 @@ function isNetworkError(err: unknown): boolean {
 async function get<T>(path: string, params: Record<string, string> = {}): Promise<T> {
   const cacheKey = `${path}?${new URLSearchParams(params).toString()}`;
 
-  // Always check cache first — works offline
+  // Always check cache first — works offline and avoids hitting the proxy
   const cached = await getCached<T>(cacheKey);
   if (cached) return cached;
 
   return enqueueRequest(async () => {
-    // Re-check cache after waiting in queue (another call may have filled it)
+    // Re-check after queue wait — another concurrent call may have filled it
     const cachedAfterWait = await getCached<T>(cacheKey);
     if (cachedAfterWait) return cachedAfterWait;
 
-    const url = new URL(`${BASE_URL}${path}`);
-    url.searchParams.set('api_key', TMDB_API_KEY);
-    for (const [k, v] of Object.entries(params)) {
-      url.searchParams.set(k, v);
-    }
-
     let lastError: Error | null = null;
+
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {
-        const res = await fetch(url.toString());
-        if (res.status === 429) {
-          const retryAfter = Number(res.headers.get('retry-after')) || 1.5;
-          const backoff = Math.max(retryAfter * 1000, 1000 * (attempt + 1));
-          console.warn(`[TMDB] Rate limited on ${path}, retrying in ${backoff}ms (attempt ${attempt + 1})`);
-          await sleep(backoff);
-          lastRequestAt = Date.now();
-          lastError = new Error(`TMDB 429: ${path}`);
-          continue;
-        }
-        if (!res.ok) throw new Error(`TMDB ${res.status}: ${path}`);
-        const data = (await res.json()) as T;
+        const data = await proxyFetch<T>('tmdb', { path, params });
         await setCached(cacheKey, data);
         return data;
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
-        // Fail immediately on network errors — no point retrying when offline
+
+        // Offline — no point retrying
         if (isNetworkError(lastError)) throw lastError;
-        // API errors — brief backoff then retry
-        if (attempt < MAX_RETRIES - 1) {
-          await sleep(400 * (attempt + 1));
+
+        // Proxy rate-limited (worker received 429 from TMDB) — back off
+        const is429 =
+          lastError.message.includes('429') || lastError.message.includes('rate');
+        if (is429 && attempt < MAX_RETRIES - 1) {
+          const backoff = 1000 * (attempt + 1);
+          console.warn(`[TMDB Proxy] 429 on ${path}, retrying in ${backoff}ms`);
+          await sleep(backoff);
           lastRequestAt = Date.now();
+          continue;
         }
+
+        // User not signed in — proxy can't be used, bail immediately
+        const is401 = lastError.message.includes('401') || lastError.message.includes('signed in');
+        if (is401) throw lastError;
+
+        // Other non-retryable error
+        if (!is429) break;
       }
     }
-    throw lastError ?? new Error(`TMDB failed: ${path}`);
+
+    throw lastError ?? new Error(`TMDB proxy failed: ${path}`);
   });
 }
 
@@ -182,6 +180,11 @@ function mapTV(raw: any): MediaItem {
     genres: raw.genres?.map((g: { name: string }) => g.name) ?? [],
     genre_ids: raw.genre_ids,
     tagline: raw.tagline,
+    seasons: raw.seasons?.map((s: any) => ({
+      seasonNumber: s.season_number,
+      posterUrl: posterUrl(s.poster_path),
+      backdropUrl: backdropUrl(s.poster_path), // TMDB seasons usually only have poster_path, but it can be used for both or just omitted.
+    })) ?? [],
   };
 }
 

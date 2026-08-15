@@ -35,8 +35,14 @@ function tallyGenres(
   events: WatchEvent[],
   limit = 10,
 ): { genre: string; count: number }[] {
+  // Count genres per unique mediaId so TV shows don't inflate genre counts by
+  // episode completions. For each mediaId, only the first encountered event's
+  // genres are counted.
   const map = new Map<string, number>();
+  const seenMedia = new Set<string>();
   for (const event of events) {
+    if (seenMedia.has(event.mediaId)) continue;
+    seenMedia.add(event.mediaId);
     for (const g of event.genres) {
       map.set(g, (map.get(g) ?? 0) + 1);
     }

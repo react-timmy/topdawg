@@ -9,3 +9,10 @@ export function navigateToNotificationsUpcoming() {
   }
   navigationRef.navigate('Notifications', { initialTab: 'upcoming' });
 }
+
+export function navigateToScanner() {
+  if (!navigationRef.isReady()) {
+    throw new Error('Navigation not ready');
+  }
+  navigationRef.navigate('Scanner');
+}

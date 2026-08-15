@@ -1,9 +1,72 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Each user can only read and write their own data.
+
+    // ── Per-user data ─────────────────────────────────────────────────────
+    // Each user can only read and write their own subtree.
     match /users/{uid}/{document=**} {
       allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // ── Watch Parties ─────────────────────────────────────────────────────
+    // Any authenticated user may read a room (to join or show invite info).
+    // Only the host (hostUid == auth.uid) may write the root room document.
+    // Members write only their own member doc and chat messages.
+    match /watchParties/{roomId} {
+
+      // Read: any signed-in user (needed to validate join + get playback state)
+      allow read: if request.auth != null;
+
+      // Create: the creator must set themselves as hostUid
+      allow create: if request.auth != null
+                    && request.resource.data.hostUid == request.auth.uid;
+
+      // Update: host can update anything; members can only bump memberCount
+      allow update: if request.auth != null && (
+        // Host can update everything
+        resource.data.hostUid == request.auth.uid
+        ||
+        // Any member can increment/decrement memberCount (join/leave)
+        (
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['memberCount'])
+        )
+      );
+
+      // Delete: host only
+      allow delete: if request.auth != null
+                    && resource.data.hostUid == request.auth.uid;
+
+      // ── Members sub-collection ──────────────────────────────────────────
+      match /members/{uid} {
+        // Any member of the room can read all member docs (for the member list)
+        allow read: if request.auth != null;
+
+        // Users can only write their own member document
+        allow write: if request.auth != null && request.auth.uid == uid;
+      }
+
+      // ── Chat messages ───────────────────────────────────────────────────
+      match /messages/{msgId} {
+        // Any authenticated user can read messages in a room they're in
+        allow read: if request.auth != null;
+
+        // Any authenticated user can create a message attributed to themselves
+        allow create: if request.auth != null
+                      && request.resource.data.uid == request.auth.uid
+                      && request.resource.data.text is string
+                      && request.resource.data.text.size() <= 300;
+
+        // Messages are immutable once sent
+        allow update, delete: if false;
+      }
+    }
+
+    // ── Collection Group Query: Members ───────────────────────────────────
+    // Allow authenticated users to query across all members subcollections
+    // to find rooms they're participating in (used by getUserActiveRooms)
+    match /{path=**}/members/{uid} {
+      allow read: if request.auth != null;
     }
   }
 }

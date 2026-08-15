@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState, useMemo } from 'react';
 import {
   View,
   Text,
@@ -31,6 +31,9 @@ import {
   Check,
   RefreshCw,
   Youtube,
+  Users,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react-native';
 import Animated, {
   FadeIn,
@@ -51,9 +54,11 @@ import { animeService } from '../services/animeService';
 import { geminiAIService } from '../services/geminiAIService';
 import { watchProgressService } from '../storage/watchProgressService';
 import { watchHistoryService } from '../storage/watchHistoryService';
-import { useBadgeUnlock } from '../context/BadgeUnlockContext';
 import { usePro } from '../context/ProContext';
 import { fileLabel } from '../services/fileOrganizeService';
+import { useWatchParty } from '../context/WatchPartyContext';
+import { useAccount } from '../context/AccountContext';
+import { truncateDescription } from '../utils/descriptionUtils';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const BACKDROP_HEIGHT = SCREEN_HEIGHT * 0.42;
@@ -112,7 +117,7 @@ function SimilarCard({ sim }: { sim: MediaItem }) {
       <Text style={styles.similarTitle} numberOfLines={2}>{sim.title}</Text>
       <View style={styles.similarMeta}>
         <Star size={10} color="#4ade80" fill="#4ade80" />
-        <Text style={styles.similarMetaText}>{sim.rating.toFixed(1)}</Text>
+        <Text style={styles.similarMetaText}>{sim.rating != null ? sim.rating.toFixed(1) : '—'}</Text>
         {sim.releaseDate ? (
           <Text style={styles.similarMetaText}>· {sim.releaseDate.split('-')[0]}</Text>
         ) : null}
@@ -217,8 +222,9 @@ export function DetailsScreen() {
   const [episodesLoading, setEpisodesLoading] = useState(false);
   const [selectedSeason, setSelectedSeason] = useState(1);
   const [trailerUrl, setTrailerUrl] = useState<string | null>(null);
-  const { checkForNewBadges } = useBadgeUnlock();
   const { isPro } = usePro();
+  const party = useWatchParty();
+  const { account } = useAccount();
 
   const [showMatchModal, setShowMatchModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -236,6 +242,25 @@ export function DetailsScreen() {
   const [similarItems, setSimilarItems] = useState<MediaItem[]>([]);
   const [tvTab, setTvTab] = useState<'episodes' | 'similar'>('episodes');
   const [isWatched, setIsWatched] = useState(false);
+  const [expandedDescription, setExpandedDescription] = useState(false);
+
+  // Identify the latest season for TV shows based on local files
+  const latestSeasonNumber = useMemo(() => {
+    if (item.type !== 'tv' || !item.localFiles || item.localFiles.length === 0) return null;
+    return Math.max(...item.localFiles.map((f) => f.seasonNumber || 1));
+  }, [item]);
+
+  // Compute display poster and backdrop (overriding with season-specific ones if available)
+  const { displayPosterUrl, displayBackdropUrl } = useMemo(() => {
+    let p = item.posterUrl;
+    let b = item.backdropUrl;
+    if (item.type === 'tv' && latestSeasonNumber != null && item.seasons) {
+      const seasonData = item.seasons.find((s) => s.seasonNumber === latestSeasonNumber);
+      if (seasonData?.posterUrl) p = seasonData.posterUrl;
+      if (seasonData?.backdropUrl) b = seasonData.backdropUrl;
+    }
+    return { displayPosterUrl: p, displayBackdropUrl: b };
+  }, [item, latestSeasonNumber]);
 
   const cleanFilenameForSearch = (filename: string) => {
     return filename
@@ -604,7 +629,7 @@ export function DetailsScreen() {
     setIsWatched(true);
     // Check for newly earned badges after manual mark
     const history = await watchHistoryService.getHistory();
-    void checkForNewBadges(history);
+    
   };
 
   const handlePlayMovie = () => {
@@ -683,6 +708,26 @@ export function DetailsScreen() {
     }
   };
 
+  const handleCreateWatchParty = async () => {
+    if (!account) {
+      Alert.alert('Sign in required', 'You must be signed in to create a watch party.');
+      return;
+    }
+
+    const activeFile = item.localFile || (item.localFiles && item.localFiles[0]);
+    if (!activeFile?.uri) {
+      Alert.alert('Notice', 'No local video file available to watch together.');
+      return;
+    }
+
+    try {
+      const roomId = await party.createParty(item, activeFile.uri || null);
+      navigation.navigate('WatchParty', { roomId, item });
+    } catch (e) {
+      Alert.alert('Error', e instanceof Error ? e.message : 'Failed to create watch party.');
+    }
+  };
+
   // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <View style={styles.root}>
@@ -722,9 +767,9 @@ export function DetailsScreen() {
         {/* ── Hero backdrop ──────────────────────────────────────────────────── */}
         <View style={styles.backdropContainer}>
           <Animated.View style={[StyleSheet.absoluteFillObject, backdropParallax]}>
-            {item.backdropUrl ? (
+            {displayBackdropUrl ? (
               <Image
-                source={{ uri: item.backdropUrl }}
+                source={{ uri: displayBackdropUrl }}
                 style={StyleSheet.absoluteFillObject}
                 resizeMode="cover"
               />
@@ -748,14 +793,34 @@ export function DetailsScreen() {
             entering={FadeIn.delay(150).duration(500)}
             style={styles.posterWrap}
           >
-            {item.posterUrl ? (
+            {displayPosterUrl ? (
               <Image
-                source={{ uri: item.posterUrl }}
+                source={{ uri: displayPosterUrl }}
                 style={styles.poster}
                 resizeMode="cover"
               />
             ) : null}
           </Animated.View>
+
+          {/* Streaming providers — top-right of backdrop */}
+          {providersLoaded && watchProviders.length > 0 ? (
+            <Animated.View entering={FadeIn.delay(200).duration(400)} style={styles.providersOverlay}>
+              {watchProviders.map((p) => (
+                <Pressable
+                  key={p.id}
+                  style={styles.providerBtnOverlay}
+                  onPress={() => handleOpenProvider(p)}
+                >
+                  <BlurView intensity={60} tint="dark" style={StyleSheet.absoluteFillObject} />
+                  {p.logoUrl ? (
+                    <Image source={{ uri: p.logoUrl }} style={styles.providerLogoOverlay} />
+                  ) : (
+                    <Globe size={16} color="#ffffff" />
+                  )}
+                </Pressable>
+              ))}
+            </Animated.View>
+          ) : null}
 
           {/* Left column: title/logo → tagline → info strip, all stacked bottom-left */}
           <Animated.View
@@ -791,7 +856,7 @@ export function DetailsScreen() {
 
               {/* Star rating */}
               <Star size={11} color="#4ade80" fill="#4ade80" />
-              <Text style={styles.infoStripText}>{item.rating.toFixed(1)}</Text>
+              <Text style={styles.infoStripText}>{item.rating != null ? item.rating.toFixed(1) : '—'}</Text>
 
               <View style={styles.infoStripDot} />
 
@@ -817,18 +882,13 @@ export function DetailsScreen() {
         {/* ── Content ────────────────────────────────────────────────────────── */}
         <View style={styles.content}>
 
-          {/* Overview — moved above genre pills and action buttons for better hierarchy */}
-          <Animated.View entering={FadeInDown.delay(120).duration(400)}>
-            <Text style={styles.overview}>{item.description}</Text>
-          </Animated.View>
-
           {/* Genre pills — always exactly 3 */}
           {(() => {
             const raw = item.genres ?? [];
             const capped = raw.slice(0, 3);
             while (capped.length < 3) capped.push('Other');
             return (
-              <Animated.View entering={FadeInDown.delay(150).duration(400)} style={styles.genreRow}>
+              <Animated.View entering={FadeInDown.delay(120).duration(400)} style={styles.genreRow}>
                 {capped.map((g, idx) => (
                   <View key={`${g}-${idx}`} style={styles.genrePill}>
                     <Text style={styles.genrePillText}>{g}</Text>
@@ -838,30 +898,37 @@ export function DetailsScreen() {
             );
           })()}
 
+          {/* Overview — moved below genre pills */}
+          <Animated.View entering={FadeInDown.delay(150).duration(400)}>
+            {(() => {
+              const { truncated, isTruncated } = truncateDescription(item.description);
+              const displayText = expandedDescription ? item.description : truncated;
+              
+              return (
+                <View>
+                  <Text style={styles.overview}>{displayText}</Text>
+                  {isTruncated && (
+                    <Pressable 
+                      onPress={() => setExpandedDescription(!expandedDescription)}
+                      style={styles.expandButton}
+                    >
+                      <Text style={styles.expandButtonText}>
+                        {expandedDescription ? 'Show less' : 'Show more'}
+                      </Text>
+                      {expandedDescription ? (
+                        <ChevronUp size={14} color="#3b82f6" />
+                      ) : (
+                        <ChevronDown size={14} color="#3b82f6" />
+                      )}
+                    </Pressable>
+                  )}
+                </View>
+              );
+            })()}
+          </Animated.View>
+
           {/* Action buttons */}
           <Animated.View entering={FadeInDown.delay(180).duration(400)} style={styles.actionSectionContainer}>
-            {/* Supported streaming platforms only — hidden when none available */}
-            {providersLoaded && watchProviders.length > 0 ? (
-              <View style={styles.providersRow}>
-                {watchProviders.map((p) => (
-                  <Pressable
-                    key={p.id}
-                    style={styles.providerBtn}
-                    onPress={() => handleOpenProvider(p)}
-                  >
-                    <BlurView intensity={50} tint="dark" style={StyleSheet.absoluteFillObject} />
-                    {p.logoUrl ? (
-                      <Image source={{ uri: p.logoUrl }} style={styles.providerLogo} />
-                    ) : (
-                      <Globe size={14} color="#ffffff" />
-                    )}
-                    <Text style={styles.providerBtnText} numberOfLines={1}>
-                      {p.name}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
-            ) : null}
 
             <View style={styles.secondaryActionsRow}>
               {/* Watch Trailer — only shown when trailerUrl is available */}
@@ -1307,6 +1374,35 @@ const styles = StyleSheet.create({
   },
   poster: { width: '100%', height: '100%' },
 
+  // Streaming providers overlay — top-right of backdrop
+  providersOverlay: {
+    position: 'absolute',
+    top: 43,
+    right: 16,
+    flexDirection: 'row',
+    gap: 8,
+  },
+  providerBtnOverlay: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  providerLogoOverlay: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+  },
+
   // Left column — anchored bottom-left inside the backdrop, right edge stops before the poster
   leftColumn: {
     position: 'absolute',
@@ -1512,6 +1608,18 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#d4d4d8',
     lineHeight: 22,
+  },
+  expandButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: 10,
+  },
+  expandButtonText: {
+    fontSize: 12,
+    color: '#3b82f6',
+    fontWeight: '600',
   },
 
   // TV section

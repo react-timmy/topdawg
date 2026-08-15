@@ -6,6 +6,40 @@ const RECENTLY_MATCHED_KEY = '@cinescan:recently_matched';
 /** Cap so the list cannot grow without bound across many scans. */
 const RECENTLY_MATCHED_MAX = 200;
 
+// ─── Sync hook (v1.2) ─────────────────────────────────────────────────────────
+// AccountProvider registers a callback here so every starred/unstarred change
+// (and any update that touches starred or lastEpisode) is also pushed to
+// Firestore — without creating a direct dependency on Firestore here.
+
+export type StarChangedEvent =
+  | { action: 'starred'; item: MediaItem }   // item now has starred: true
+  | { action: 'unstarred'; id: string };     // item was un-starred
+
+let _onStarChanged: ((event: StarChangedEvent) => void) | null = null;
+
+/**
+ * Register (or deregister) a callback invoked after any local write that
+ * changes a library item's starred state or lastEpisode.
+ * Pass null to remove the hook (on sign-out).
+ */
+export function setOnStarChanged(
+  cb: ((event: StarChangedEvent) => void) | null,
+): void {
+  _onStarChanged = cb;
+}
+
+/**
+ * When true, updateItem and toggleStar will NOT fire _onStarChanged.
+ * Set this before writes that originate from the cloud listener or
+ * initialSync to prevent the local write from echoing back to Firestore.
+ */
+let _suppressStarHook = false;
+
+export function suppressStarHook(suppress: boolean): void {
+  _suppressStarHook = suppress;
+}
+
+
 /** Migrate legacy bare-numeric ids → `movie:123` / `tv:123`. */
 function normalizeItemId(item: MediaItem): MediaItem {
   if (item.id.includes(':')) return item;
@@ -126,6 +160,19 @@ export const storageService = {
       i.id === id ? { ...i, starred: !i.starred } : i,
     );
     await storageService.saveLibrary(updated);
+
+    // v1.2: notify sync layer (skip if this write came from the cloud listener)
+    if (!_suppressStarHook) {
+      const changed = updated.find((i) => i.id === id);
+      if (changed) {
+        if (changed.starred) {
+          _onStarChanged?.({ action: 'starred', item: changed });
+        } else {
+          _onStarChanged?.({ action: 'unstarred', id });
+        }
+      }
+    }
+
     return updated;
   },
 
@@ -135,6 +182,20 @@ export const storageService = {
       i.id === id ? { ...i, ...patch } : i,
     );
     await storageService.saveLibrary(updated);
+
+    // v1.2: notify sync layer if starred state or lastEpisode changed
+    // Skip if this write came from the cloud listener to prevent echo loops.
+    if (!_suppressStarHook && ('starred' in patch || 'lastEpisode' in patch)) {
+      const changed = updated.find((i) => i.id === id);
+      if (changed) {
+        if (changed.starred) {
+          _onStarChanged?.({ action: 'starred', item: changed });
+        } else if ('starred' in patch && !changed.starred) {
+          _onStarChanged?.({ action: 'unstarred', id });
+        }
+      }
+    }
+
     return updated;
   },
 
@@ -204,4 +265,146 @@ export const storageService = {
       // silently fail
     }
   },
+
+  // ── Scan status (for UI indicators) ───────────────────────────────────────
+  async getScanStatus(): Promise<string | null> {
+    try {
+      const raw = await AsyncStorage.getItem(SCAN_STATUS_KEY);
+      return raw;
+    } catch {
+      return null;
+    }
+  },
+
+  async saveScanStatus(status: string): Promise<void> {
+    try {
+      await AsyncStorage.setItem(SCAN_STATUS_KEY, status);
+      // notify hook if set
+      try { _onScanStatusChanged?.(status); } catch (e) { /* ignore */ }
+    } catch (err) {
+      console.error('[Storage] saveScanStatus failed:', err);
+    }
+  },
+
+  async clearScanStatus(): Promise<void> {
+    try {
+      await AsyncStorage.removeItem(SCAN_STATUS_KEY);
+      try { _onScanStatusChanged?.('idle'); } catch (e) { /* ignore */ }
+    } catch {
+      // silently fail
+    }
+  },
+
+  // ── Scan FAB visibility (shared between Movies/TV screens)
+  async getScanFabVisibility(): Promise<boolean> {
+    if (lastSavedVisibility !== null) {
+      return lastSavedVisibility;
+    }
+    try {
+      const raw = await AsyncStorage.getItem(SCAN_FAB_VISIBLE_KEY);
+      const val = raw === null ? true : raw === '1';
+      lastSavedVisibility = val;
+      return val;
+    } catch {
+      return true;
+    }
+  },
+
+  async saveScanFabVisibility(visible: boolean): Promise<void> {
+    if (lastSavedVisibility === visible) {
+      return;
+    }
+    lastSavedVisibility = visible;
+    try {
+      await AsyncStorage.setItem(SCAN_FAB_VISIBLE_KEY, visible ? '1' : '0');
+      try { _onScanFabVisibilityChanged?.(visible); } catch (e) { /* ignore */ }
+    } catch (err) {
+      console.error('[Storage] saveScanFabVisibility failed:', err);
+    }
+  },
 };
+
+// Add scan status key and hook definitions after exports (module-scoped)
+const SCAN_STATUS_KEY = '@cinescan:scan_status';
+let _onScanStatusChanged: ((s: string) => void) | null = null;
+
+export function setOnScanStatusChanged(cb: ((s: string) => void) | null) {
+  _onScanStatusChanged = cb;
+}
+
+// Scan FAB visibility key + hook
+const SCAN_FAB_VISIBLE_KEY = '@cinescan:scan_fab_visible';
+let _onScanFabVisibilityChanged: ((v: boolean) => void) | null = null;
+let lastSavedVisibility: boolean | null = null;
+
+export function setOnScanFabVisibilityChanged(cb: ((v: boolean) => void) | null) {
+  _onScanFabVisibilityChanged = cb;
+}
+
+// ── Last scan summary persistence ───────────────────────────────────────────
+const LAST_SCAN_KEY = '@cinescan:last_scan_result';
+
+export type LastScanResult = {
+  timestamp: string;
+  progress?: {
+    total?: number;
+    processed?: number;
+    scanned?: number;
+    matched?: number;
+    added?: number;
+    skipped?: number;
+    phase?: string;
+  };
+  matched?: Array<{ id?: string; title?: string; posterUrl?: string; filename?: string }>;
+  unmatched?: Array<{ uri?: string; filename?: string }>;
+};
+
+export async function saveLastScanResult(result: LastScanResult | null): Promise<void> {
+  try {
+    if (result === null) {
+      await AsyncStorage.removeItem(LAST_SCAN_KEY);
+      return;
+    }
+    await AsyncStorage.setItem(LAST_SCAN_KEY, JSON.stringify(result));
+  } catch (err) {
+    console.error('[Storage] saveLastScanResult failed:', err);
+  }
+}
+
+export async function getLastScanResult(): Promise<LastScanResult | null> {
+  try {
+    const raw = await AsyncStorage.getItem(LAST_SCAN_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as LastScanResult;
+  } catch (err) {
+    return null;
+  }
+}
+
+export async function clearLastScanResult(): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(LAST_SCAN_KEY);
+  } catch (err) {
+    // ignore
+  }
+}
+
+// Attach helpers onto storageService for convenience
+try {
+  // @ts-ignore - dynamic augmentation
+  storageService.saveLastScanResult = saveLastScanResult;
+  // @ts-ignore
+  storageService.getLastScanResult = getLastScanResult;
+  // @ts-ignore
+  storageService.clearLastScanResult = clearLastScanResult;
+  // Attach FAB visibility hook for compatibility (allows storageService.setOnScanFabVisibilityChanged(...))
+  try {
+    // @ts-ignore
+    storageService.setOnScanFabVisibilityChanged = setOnScanFabVisibilityChanged;
+  } catch (err) {
+    // ignore
+  }
+} catch (e) {
+  // ignore
+}
+

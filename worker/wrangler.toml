@@ -1,0 +1,18 @@
+name = "filmsort-proxy"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+# Secrets are set via: wrangler secret put <NAME>
+# They are encrypted at rest and never appear in source code.
+# Required secrets:
+#   TMDB_API_KEY
+#   GEMINI_API_KEY
+# Optional:
+#   GEMINI_PRO_API_KEY          (for the Pro "Skip the Line" lane)
+#   OPENSUBTITLES_API_KEY       (for subtitle auto-fetch; 20 free downloads/day)
+#                                Register at https://www.opensubtitles.com/en/consumers
+
+[vars]
+# Your Firebase project ID — NOT a secret, just config.
+FIREBASE_PROJECT_ID = "filmoor-49db3"

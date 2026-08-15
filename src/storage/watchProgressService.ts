@@ -39,9 +39,16 @@ async function readAll(): Promise<Record<string, WatchProgress>> {
 async function writeAll(map: Record<string, WatchProgress>): Promise<void> {
   try {
     await AsyncStorage.setItem(PROGRESS_KEY, JSON.stringify(map));
+    // Notify listeners that progress changed (e.g., lastPlayedAt updated)
+    try { _onProgressChanged?.(); } catch (e) { /* ignore listener errors */ }
   } catch (err) {
     console.warn('[WatchProgress] save failed', err);
   }
+}
+
+let _onProgressChanged: (() => void) | null = null;
+export function setOnProgressChanged(cb: (() => void) | null) {
+  _onProgressChanged = cb;
 }
 
 export const watchProgressService = {
@@ -133,11 +140,11 @@ export const watchProgressService = {
 
   /** Get the most recent lastPlayedAt timestamp for a media item across all its files */
   async getLastPlayedAt(mediaId: string, files: LocalFile[]): Promise<string | null> {
-    if (files.length === 0) return null;
     const all = await readAll();
     let latestPlayedAt: string | null = null;
 
-    for (const file of files) {
+    // Prefer matches against known local files
+    for (const file of files ?? []) {
       const p = all[progressKey(mediaId, file)];
       if (p?.lastPlayedAt) {
         if (!latestPlayedAt || p.lastPlayedAt > latestPlayedAt) {
@@ -145,6 +152,26 @@ export const watchProgressService = {
         }
       }
     }
+
+    // If no play records found for the provided files, fall back to scanning
+    // any persisted progress entries for this mediaId. This handles cases where
+    // the played file isn't present in the current item's localFiles (e.g.,
+    // rematch/merge differences or filesystem URIs changed), but we still want
+    // the title to surface as recently played.
+    if (!latestPlayedAt) {
+      const prefix = `${mediaId}::`;
+      for (const key of Object.keys(all)) {
+        if (!key.startsWith(prefix)) continue;
+        const p = all[key];
+        if (p?.lastPlayedAt) {
+          if (!latestPlayedAt || p.lastPlayedAt > latestPlayedAt) {
+            latestPlayedAt = p.lastPlayedAt;
+          }
+        }
+      }
+    }
+
     return latestPlayedAt;
   },
+
 };

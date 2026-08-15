@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -35,6 +35,7 @@ import {
   Sparkles,
   Zap,
 } from "lucide-react-native";
+import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as DocumentPicker from "expo-document-picker";
 import * as MediaLibrary from "expo-media-library";
@@ -59,6 +60,61 @@ export interface ScannerProps {
 }
 
 const AI_ENABLED_STORAGE_KEY = "@cinescan:ai_parsing_enabled";
+
+// Persisted pending disambiguation so modal + resolution survives navigation
+const PENDING_DISAMBIG_KEY = "@cinescan:pending_disambiguation";
+// Module-level registry: pendingId -> resolve function. Keeps promise alive across
+// Scanner component unmount/remount within the same app session (not app restart).
+const pendingDisambiguationResolves: Map<string, (id: string | null) => void> = new Map();
+
+/** Seconds the on-screen Cancel control stays available. */
+const CANCEL_WINDOW_MS = 5000;
+
+/**
+ * Lives outside the component so a scan survives leaving Scanner (stack pop).
+ * Leaving the screen means "go ahead" — never treat blur as cancel.
+ */
+type ScanUiSnapshot = { state: ScanState; progress: MediaScanProgress };
+const scanSession = {
+  active: false,
+  cancelRequested: false,
+  /** Seconds remaining in the cancel window. */
+  cancelUntil: 5,
+  focused: true,
+};
+let scanUiSnapshot: ScanUiSnapshot = { state: "idle", progress: { ...INITIAL_SCAN_PROGRESS } };
+const scanUiListeners = new Set<(s: ScanUiSnapshot) => void>();
+
+function publishScanUi(partial: Partial<ScanUiSnapshot>) {
+  scanUiSnapshot = {
+    state: partial.state ?? scanUiSnapshot.state,
+    progress: partial.progress ?? scanUiSnapshot.progress,
+  };
+  scanUiListeners.forEach((l) => {
+    try { l(scanUiSnapshot); } catch (e) {}
+  });
+}
+
+function userLeftScanner(): boolean {
+  return !scanSession.focused || AppState.currentState !== "active";
+}
+
+async function notifyScanAway(
+  kind: "progress" | "complete",
+  payload: Record<string, unknown>,
+) {
+  if (!userLeftScanner()) return;
+  try {
+    const ns = await import("../services/notificationService");
+    if (kind === "complete") {
+      await ns.showScanCompleteNotification(payload as { matchedCount: number; unmatchedCount?: number });
+    } else {
+      await ns.showScanNotification(payload as { phase?: string; processed?: number; total?: number; matched?: number });
+    }
+  } catch {
+    /* ignore */
+  }
+}
 
 /** Match app.config.js expo-media-library granularPermissions: video only. */
 const VIDEO_GRANULAR: MediaLibrary.GranularPermission[] = ["video"];
@@ -156,18 +212,6 @@ function CancelButton({ countdown, onCancel }: { countdown: number; onCancel: ()
   );
 }
 
-function BlinkingText({ text }: { text: string }) {
-  const opacity = useSharedValue(1);
-  useEffect(() => {
-    opacity.value = withRepeat(
-      withTiming(0.3, { duration: 1000, easing: Easing.inOut(Easing.ease) }),
-      -1,
-      true,
-    );
-  }, [opacity]);
-  const animatedStyle = useAnimatedStyle(() => ({ opacity: opacity.value }));
-  return <Animated.Text style={[styles.blinkingText, animatedStyle]}>{text}</Animated.Text>;
-}
 
 /** Yield so the UI thread can paint progress between network-heavy steps. */
 function yieldToUI(): Promise<void> {
@@ -215,34 +259,187 @@ async function fetchAllVideoFiles(): Promise<LocalFile[]> {
 }
 
 export function Scanner({ onScanComplete }: ScannerProps) {
-  const [scanState, setScanState] = useState<ScanState>("idle");
-  const [progress, setProgress] = useState<MediaScanProgress>(INITIAL_SCAN_PROGRESS);
+  const [localScanState, setLocalScanState] = useState<ScanState>(scanUiSnapshot.state);
+  const [localProgress, setLocalProgress] = useState<MediaScanProgress>(scanUiSnapshot.progress);
+
+  const setScanState = useCallback((s: ScanState | ((prev: ScanState) => ScanState)) => {
+    const nextState = typeof s === 'function' ? s(scanUiSnapshot.state) : s;
+    publishScanUi({ state: nextState });
+  }, []);
+
+  const setProgress = useCallback((p: MediaScanProgress | ((prev: MediaScanProgress) => MediaScanProgress)) => {
+    const nextProgress = typeof p === 'function' ? p(scanUiSnapshot.progress) : p;
+    publishScanUi({ progress: nextProgress });
+  }, []);
+
+  const scanState = localScanState;
+  const progress = localProgress;
+
+  const navigation = useNavigation<any>();
+
+  useEffect(() => {
+    scanSession.focused = true;
+    const unsubscribeFocus = navigation.addListener('focus', () => {
+      scanSession.focused = true;
+    });
+    const unsubscribeBlur = navigation.addListener('blur', () => {
+      scanSession.focused = false;
+    });
+    return () => {
+      scanSession.focused = false;
+      unsubscribeFocus();
+      unsubscribeBlur();
+    };
+  }, [navigation]);
+
+  useEffect(() => {
+    // Sync initial state from the global snapshot
+    setLocalScanState(scanUiSnapshot.state);
+    setLocalProgress(scanUiSnapshot.progress);
+
+    const listener = (snapshot: ScanUiSnapshot) => {
+      setLocalScanState(snapshot.state);
+      setLocalProgress(snapshot.progress);
+    };
+    scanUiListeners.add(listener);
+
+    return () => {
+      scanUiListeners.delete(listener);
+    };
+  }, []);
   const [aiEnabled, setAiEnabled] = useState(true);
   const [hasScanned, setHasScanned] = useState(false);
   const [aiToast, setAiToast] = useState<string | null>(null);
+
+  // Displayed percent smooths jumps (esp. during AI batching) so the UI grows gradually
+  const initialRaw = scanUiSnapshot.progress.total && scanUiSnapshot.progress.total > 0 
+    ? (scanUiSnapshot.progress.processed ?? 0) / scanUiSnapshot.progress.total 
+    : 0;
+  const [displayedPercent, setDisplayedPercent] = useState(initialRaw);
+  const displayedPercentRef = useRef(initialRaw);
+  useEffect(() => { displayedPercentRef.current = displayedPercent; }, [displayedPercent]);
+
+  useEffect(() => {
+    const raw = progress.total && progress.total > 0 ? (progress.processed ?? 0) / progress.total : 0;
+    const aiPhase = /[Gg]emini|[Aa]I|Sending|Waiting for Gemini|Parsing/i.test(progress.phase ?? '');
+    const cap = aiPhase ? 0.97 : 1;
+    const target = Math.min(raw, cap);
+    let cancelled = false;
+    let timer: any = null;
+    function step() {
+      if (cancelled) return;
+      const cur = displayedPercentRef.current;
+      const diff = target - cur;
+      if (Math.abs(diff) < 0.001) {
+        setDisplayedPercent(target);
+        return;
+      }
+      let next;
+      if (diff > 0) {
+        next = Math.min(target, cur + Math.max(diff * 0.2, 0.01));
+      } else {
+        next = Math.max(target, cur + Math.min(diff * 0.2, -0.01));
+      }
+      setDisplayedPercent(next);
+      displayedPercentRef.current = next;
+      timer = setTimeout(step, 80);
+    }
+    step();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [progress.processed, progress.total, progress.phase]);
+
+  // Drawer animation state — created before usePro binding below
+  const drawerOpenRef = useRef(false);
+  const drawerAnim = useSharedValue(0); // 0 closed, 1 open
+  function toggleDrawer() {
+    drawerOpenRef.current = !drawerOpenRef.current;
+    drawerAnim.value = withTiming(drawerOpenRef.current ? 1 : 0, { duration: 280 });
+  }
+  const drawerStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: withTiming(drawerAnim.value === 1 ? 0 : 8) }],
+    opacity: withTiming(drawerAnim.value === 1 ? 1 : 0.98),
+  }));
+
+  function ScansDrawer({ isProLocal, scansRemainingLocal }: { isProLocal: boolean; scansRemainingLocal: number }) {
+    // If Pro, hide drawer and just show a tiny spacer so layout unchanged
+    if (isProLocal) return <View style={styles.scanningTips} />;
+    return (
+      <Animated.View style={[styles.scansDrawerWrap, drawerStyle]}>
+        <Pressable
+          onPress={toggleDrawer}
+          style={({ pressed }) => [styles.scansDrawerHeader, pressed && { opacity: 0.9 }]}
+        >
+          <Zap size={13} color="#71717a" />
+          <Text style={styles.scansHeaderText}>Scans left · {scansRemainingLocal}</Text>
+        </Pressable>
+        <Animated.View
+          style={[styles.scansDrawerBody, { height: drawerAnim.value ? 72 : 0, overflow: 'hidden' }]}
+        >
+          <Text style={styles.scansBodyText}>
+            Monthly free AI scans remaining: {scansRemainingLocal}. Upgrade to Pro for unlimited scanning.
+          </Text>
+        </Animated.View>
+      </Animated.View>
+    );
+  }
+
+  // Pulse animation for the AI icon: when AI is enabled and a scan is running
+  const aiPulse = useSharedValue(1);
+  useEffect(() => {
+    if (aiEnabled && scanState === "scanning") {
+      aiPulse.value = withRepeat(
+        withTiming(1.12, { duration: 700, easing: Easing.inOut(Easing.ease) }),
+        -1,
+        true,
+      );
+    } else {
+      aiPulse.value = withTiming(1, { duration: 180 });
+    }
+  }, [aiEnabled, scanState, aiPulse]);
+  const animatedAiStyle = useAnimatedStyle(() => ({ transform: [{ scale: aiPulse.value }] }));
+
   /** False when OS won't show the permission sheet again — open Settings instead. */
   const [permissionCanAskAgain, setPermissionCanAskAgain] = useState(true);
   const { addNotification } = useNotifications();
   const { isPro, scansRemaining, refreshPro } = usePro();
   const insets = useSafeAreaInsets();
-  const scanningRef = useRef(false);
-  const cancelRequestedRef = useRef(false);
+  const scanningRef = {
+    get current() { return scanSession.active; },
+    set current(v: boolean) { scanSession.active = v; }
+  };
+  const cancelRequestedRef = {
+    get current() { return scanSession.cancelRequested; },
+    set current(v: boolean) { scanSession.cancelRequested = v; }
+  };
+  const cancelCountdownRef = {
+    get current() { return scanSession.cancelUntil; },
+    set current(v: number) { scanSession.cancelUntil = v; }
+  };
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const scanStateRef = useRef<ScanState>("idle");
+  const scanStateRef = {
+    get current() { return scanUiSnapshot.state; },
+    set current(v: ScanState) { /* no-op since it's published via setter wrapper */ }
+  };
   const handleScanLibraryRef = useRef<() => Promise<void>>(async () => {});
-  const [cancelCountdown, setCancelCountdown] = useState(10);
+  const [cancelCountdown, setCancelCountdown] = useState(scanSession.cancelUntil);
 
   type DisambiguationOption = { title: string; year: string; id: string; posterUrl?: string };
   type DisambiguationData = {
+    id?: string;
     filename: string;
     title: string;
     options: DisambiguationOption[];
-    resolve: (id: string | null) => void;
   };
   const [disambiguation, setDisambiguation] = useState<DisambiguationData | null>(null);
 
   useEffect(() => {
     scanStateRef.current = scanState;
+    // Persist scan state for global UI indicators (ScanFab)
+    try {
+      void storageService.saveScanStatus(scanState);
+    } catch (e) {
+      /* ignore */
+    }
   }, [scanState]);
 
   useEffect(() => {
@@ -250,6 +447,58 @@ export function Scanner({ onScanComplete }: ScannerProps) {
       try {
         const savedAiEnabled = await AsyncStorage.getItem(AI_ENABLED_STORAGE_KEY);
         if (savedAiEnabled !== null) setAiEnabled(savedAiEnabled === "true");
+
+        // Restore any pending disambiguation if present. The promise resolver
+        // should be alive in the module-level registry when navigation caused
+        // the Scanner component to unmount and remount within the same session.
+        try {
+          const raw = await AsyncStorage.getItem(PENDING_DISAMBIG_KEY);
+          if (raw) {
+            let parsedArray = JSON.parse(raw);
+            if (!Array.isArray(parsedArray)) parsedArray = [parsedArray].filter(Boolean);
+            
+            if (parsedArray.length > 0) {
+              const parsed = parsedArray[0];
+              if (parsed && pendingDisambiguationResolves.has(parsed.id)) {
+                setDisambiguation({ id: parsed.id, filename: parsed.filename, title: parsed.title, options: parsed.options });
+              } else if (parsed) {
+                // No in-memory resolver (e.g., after full app restart) — clear stale pending
+                try { await AsyncStorage.removeItem(PENDING_DISAMBIG_KEY); } catch (e) {}
+              }
+            }
+          }
+        } catch (e) {
+          console.error('[Scanner] failed to restore pending disambiguation', e);
+        }
+
+        // Restore last completed scan summary so the scanning UI shows final progress
+        try {
+          // storageService was augmented with getLastScanResult in asyncStorage
+          // Use optional chaining to be robust in case augmentation failed
+          // Do not overwrite an in-progress scan
+          if (!scanningRef.current) {
+            // @ts-ignore
+            const last = await storageService.getLastScanResult?.();
+            if (last && last.progress) {
+              setProgress((prev) => ({
+                ...prev,
+                phase: last.progress?.phase ?? 'complete',
+                total: last.progress?.total ?? prev.total,
+                processed: last.progress?.processed ?? prev.processed,
+                scanned: last.progress?.scanned ?? prev.scanned,
+                matched: last.progress?.matched ?? prev.matched,
+                added: last.progress?.added ?? prev.added,
+                skipped: last.progress?.skipped ?? prev.skipped,
+              }));
+              setScanState('complete');
+              setHasScanned(true);
+              try { void storageService.saveScanStatus('complete'); } catch (e) { /* ignore */ }
+            }
+          }
+        } catch (e) {
+          console.error('[Scanner] failed to restore last scan summary', e);
+        }
+
       } catch (e) {
         console.error("Failed to load scanner settings:", e);
       }
@@ -265,36 +514,62 @@ export function Scanner({ onScanComplete }: ScannerProps) {
   useEffect(() => {
     const onAppStateChange = (next: AppStateStatus) => {
       if (next !== "active") return;
-      if (scanStateRef.current !== "permission_denied") return;
-      if (scanningRef.current) return;
-
-      void (async () => {
-        try {
-          const perm = await MediaLibrary.getPermissionsAsync(false, VIDEO_GRANULAR);
-          if (perm.granted) {
-            setPermissionCanAskAgain(true);
-            await handleScanLibraryRef.current();
-            return;
+      if (scanStateRef.current !== "permission_denied") {
+        // If becoming active, check for any pending disambiguations written by notifications
+        void (async () => {
+          try {
+            const pendingRaw = await AsyncStorage.getItem(PENDING_DISAMBIG_KEY);
+            if (pendingRaw) {
+              const pending = JSON.parse(pendingRaw) as Array<any>;
+              if (pending && pending.length > 0 && !disambiguation) {
+                // Pop first pending and show modal to let the user resolve it
+                const next = pending.shift();
+                await AsyncStorage.setItem(PENDING_DISAMBIG_KEY, JSON.stringify(pending));
+                // Reconstruct minimal disambiguation data — full options will be re-fetched when user interacts
+                setDisambiguation({ id: next.id, filename: next.filename, title: next.title || next.filename, options: next.options || [] });
+              }
+            }
+          } catch (e) {
+            /* ignore */
           }
-          setPermissionCanAskAgain(perm.canAskAgain !== false);
-        } catch {
-          /* ignore */
-        }
-      })();
+        })();
+      }
+
+      if (scanStateRef.current === "permission_denied") {
+        if (scanningRef.current) return;
+
+        void (async () => {
+          try {
+            const perm = await MediaLibrary.getPermissionsAsync(false, VIDEO_GRANULAR);
+            if (perm.granted) {
+              setPermissionCanAskAgain(true);
+              await handleScanLibraryRef.current();
+              return;
+            }
+            setPermissionCanAskAgain(perm.canAskAgain !== false);
+          } catch {
+            /* ignore */
+          }
+        })();
+      }
     };
 
     const sub = AppState.addEventListener("change", onAppStateChange);
     return () => sub.remove();
-  }, []);
+  }, [disambiguation]);
 
   // While scanning: 10s window where Cancel is visible, then hide (countdown → 0).
   useEffect(() => {
     if (scanState !== "scanning") {
-      setCancelCountdown(10);
+      cancelCountdownRef.current = 5;
+      setCancelCountdown(5);
       return;
     }
     if (cancelCountdown <= 0) return;
-    const timer = setTimeout(() => setCancelCountdown((c) => c - 1), 1000);
+    const timer = setTimeout(() => {
+      cancelCountdownRef.current = Math.max(0, cancelCountdownRef.current - 1);
+      setCancelCountdown((c) => c - 1);
+    }, 1000);
     return () => clearTimeout(timer);
   }, [scanState, cancelCountdown]);
 
@@ -302,6 +577,7 @@ export function Scanner({ onScanComplete }: ScannerProps) {
     if (cancelRequestedRef.current) return;
     cancelRequestedRef.current = true;
     // Hide button immediately; scan loop will stop at the next safe checkpoint
+    cancelCountdownRef.current = 0;
     setCancelCountdown(0);
     setProgress((prev) => ({
       ...prev,
@@ -362,6 +638,11 @@ export function Scanner({ onScanComplete }: ScannerProps) {
       }));
 
       console.log(`[Scanner] Select files: ${files.length} chosen`);
+      try {
+        // Ensure global scan status reflects that a scan will run even if the
+        // Scanner UI is backgrounded or navigated away from.
+        try { void storageService.saveScanStatus('scanning'); } catch (e) { /* ignore */ }
+      } catch (e) {}
       await runScan(files);
     } catch (e) {
       (globalThis as any).__setPickerActive?.(false);
@@ -376,6 +657,7 @@ export function Scanner({ onScanComplete }: ScannerProps) {
 
     try {
       setScanState("scanning");
+      try { void storageService.saveScanStatus('scanning'); } catch (e) { /* ignore */ }
       setProgress({
         ...INITIAL_SCAN_PROGRESS,
         phase: "preparing",
@@ -475,16 +757,60 @@ export function Scanner({ onScanComplete }: ScannerProps) {
       return;
     }
     scanningRef.current = true;
-    cancelRequestedRef.current = false;
-    setCancelCountdown(10);
+    // Clear any previous last-scan summary so UI will reflect this new run
+    try { await storageService.saveLastScanResult(null); } catch (e) { /* ignore */ }
+    // If a cancel was requested during permission/picking phase, honor it and abort
+    if (cancelRequestedRef.current) {
+      console.log("[Scanner] Cancel requested before runScan started — aborting");
+      setProgress((prev) => ({ ...prev, phase: "cancelled", currentFile: "" }));
+      setScanState("idle");
+      scanningRef.current = false;
+      // clear flag so future scans are not cancelled immediately
+      cancelRequestedRef.current = false;
+      return;
+    }
+    setScanState("scanning");
+
+    // Start the countdown timer. The UI will reflect this, and the loop
+    // below will independently wait for the remaining time.
+    const startMs = Date.now();
+    const waitMs = cancelCountdownRef.current * 1000;
 
     const matchedItems: MediaItem[] = [];
     const unmatchedFiles: LocalFile[] = [];
+
+    // Wait for the countdown to finish before starting heavy work. If the user
+    // cancels during the countdown nothing should start.
+    while (!cancelRequestedRef.current) {
+      const elapsed = Date.now() - startMs;
+      const remainingSecs = Math.ceil((waitMs - elapsed) / 1000);
+      
+      if (remainingSecs <= 0) {
+        cancelCountdownRef.current = 0;
+        break;
+      }
+      
+      // Update global ref for the UI to read if it remounts
+      cancelCountdownRef.current = remainingSecs;
+      
+      // small sleep
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, 200));
+    }
+
+    if (cancelRequestedRef.current) {
+      console.log('[Scanner] Cancelled during countdown');
+      setProgress((prev) => ({ ...prev, phase: 'cancelled', currentFile: '' }));
+      setScanState('idle');
+      scanningRef.current = false;
+      // Clear the cancel flag so future scans are not immediately aborted
+      cancelRequestedRef.current = false;
+      return;
+    }
     // Defer inbox spam until the end so we don't re-render the whole app per file
     const pendingNotifications: Parameters<typeof addNotification>[0][] = [];
 
     try {
-      setScanState("scanning");
       setProgress({
         phase: "preparing",
         total: files.length,
@@ -495,12 +821,22 @@ export function Scanner({ onScanComplete }: ScannerProps) {
         skipped: 0,
         currentFile: "",
       });
+      try { void notifyScanAway('progress', { phase: 'preparing', total: files.length }); } catch (e) { /* ignore */ }
 
       // Let the scanning UI paint before heavy work
       await new Promise<void>((resolve) => {
         InteractionManager.runAfterInteractions(() => resolve());
       });
       await yieldToUI();
+
+      // If user cancelled during the initial countdown / UI paint, abort now
+      if (cancelRequestedRef.current) {
+        console.log("[Scanner] Cancelled before starting heavy work");
+        setProgress((prev) => ({ ...prev, phase: "cancelled", currentFile: "" }));
+        setScanState("idle");
+        scanningRef.current = false;
+        return;
+      }
 
       const currentLibrary = await storageService.getLibrary();
 
@@ -547,6 +883,7 @@ export function Scanner({ onScanComplete }: ScannerProps) {
             ? "complete"
             : `Queued ${newFiles.length} new file(s)`,
       }));
+      try { void notifyScanAway('progress', { phase: newFiles.length === 0 ? 'complete' : `Queued ${newFiles.length} new file(s)`, processed: skippedShort + skippedExists, total: files.length }); } catch (e) { /* ignore */ }
 
       console.log(
         `[Scanner] Input ${files.length} → new ${newFiles.length}, ` +
@@ -737,33 +1074,77 @@ export function Scanner({ onScanComplete }: ScannerProps) {
           return rankSearchResults(results, isAnimeFile)[0];
         };
 
-        /**
-         * Returns true when results contain at least two entries with different
-         * release years AND the filename gave us no year to disambiguate with.
-         * In that case we should ask the user rather than guess.
-         */
         const needsUserClarification = (results: MediaItem[]) => {
-          if (year !== null || results.length < 2) return false;
-          const years = new Set(
-            results
-              .map((r) => r.releaseDate?.split("-")[0])
-              .filter(Boolean),
-          );
-          return years.size >= 2;
+          if (results.length < 2) return false;
+
+          const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+          const searchTitle = normalize(title);
+
+          // Check if multiple results are "relevant" — meaning they either exactly
+          // match the search title OR contain the search title as a substring.
+          // If more than one result is relevant, we have genuine ambiguity and
+          // should ask the user instead of silently picking the top result.
+          const relevantResults = results.filter((r) => {
+            const t = normalize(r.title);
+            return t === searchTitle || t.includes(searchTitle) || searchTitle.includes(t);
+          });
+
+          if (relevantResults.length >= 2) return true;
+
+          // Fallback: multiple results with different release years and no year
+          // hint in the filename → also ambiguous.
+          if (year === null) {
+            const years = new Set(
+              results.map((r) => r.releaseDate?.split("-")[0]).filter(Boolean),
+            );
+            if (years.size >= 2) return true;
+          }
+
+          return false;
         };
 
         const askUser = async (results: MediaItem[]): Promise<string | null> => {
+          const pendingId = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+          // Show UI and create an externally-resolvable promise kept in module scope
+          const options = results.slice(0, 5).map((r) => ({
+            title: r.title,
+            year: r.releaseDate ? r.releaseDate.split("-")[0] : "Unknown",
+            id: r.id,
+            posterUrl: r.posterUrl,
+          }));
+
+          // Persist pending disambiguation so a remounted Scanner can restore UI
+          try {
+            const raw = await AsyncStorage.getItem(PENDING_DISAMBIG_KEY);
+            let existing = raw ? JSON.parse(raw) : [];
+            if (!Array.isArray(existing)) existing = [existing].filter(Boolean);
+            existing.push({ id: pendingId, filename, title, options });
+            await AsyncStorage.setItem(PENDING_DISAMBIG_KEY, JSON.stringify(existing));
+          } catch (e) {
+            console.error('[Scanner] failed to persist pending disambiguation', e);
+          }
+
+          // Mark attention state so UI + FAB show unresolved disambiguation
+          try { void storageService.saveScanStatus('attention'); } catch (e) { /* ignore */ }
+
+          // If app is backgrounded, schedule an OS notification and continue scanning
+          try {
+            if (AppState.currentState !== 'active') {
+              void (await import('../services/notificationService')).showDisambiguationNotification({ filename, title, optionsCount: results.length, entryId: pendingId });
+            }
+          } catch (e) {
+            console.warn('[Scanner] scheduling disambiguation notification failed', e);
+          }
+
+          // App is active — show modal and wait for user choice
+          setDisambiguation({ id: pendingId, filename, title, options });
+
           return new Promise<string | null>((resolve) => {
-            setDisambiguation({
-              filename,
-              title,
-              options: results.slice(0, 5).map((r) => ({
-                title: r.title,
-                year: r.releaseDate ? r.releaseDate.split("-")[0] : "Unknown",
-                id: r.id,
-                posterUrl: r.posterUrl,
-              })),
-              resolve,
+            pendingDisambiguationResolves.set(pendingId, (val: string | null) => {
+              // cleanup persisted state
+              try { AsyncStorage.removeItem(PENDING_DISAMBIG_KEY); } catch (e) {}
+              pendingDisambiguationResolves.delete(pendingId);
+              resolve(val);
             });
           });
         };
@@ -777,6 +1158,7 @@ export function Scanner({ onScanComplete }: ScannerProps) {
         if (needsUserClarification(results)) {
           const chosenId = await askUser(results);
           setDisambiguation(null);
+          try { void storageService.saveScanStatus(scanStateRef.current === 'scanning' ? 'scanning' : scanStateRef.current ?? 'idle'); } catch (e) { /* ignore */ }
           if (chosenId) {
             first = results.find((r) => String(r.id) === String(chosenId)) ?? null;
           }
@@ -800,6 +1182,7 @@ export function Scanner({ onScanComplete }: ScannerProps) {
           if (needsUserClarification(fallback)) {
             const chosenId = await askUser(fallback);
             setDisambiguation(null);
+            try { void storageService.saveScanStatus(scanStateRef.current === 'scanning' ? 'scanning' : scanStateRef.current ?? 'idle'); } catch (e) { /* ignore */ }
             if (chosenId) {
               first = fallback.find((r) => String(r.id) === String(chosenId)) ?? null;
             }
@@ -851,6 +1234,7 @@ export function Scanner({ onScanComplete }: ScannerProps) {
           currentFile: file.filename,
           phase: `Matching ${i + 1}/${newFiles.length} with TMDB / anime…`,
         }));
+        try { void notifyScanAway('progress', { phase: `Matching ${i + 1}/${newFiles.length}`, processed: i + 1, total: newFiles.length, matched: (progress.matched ?? 0) }); } catch (e) { /* ignore */ }
 
         // Yield every file so the scanning UI stays responsive
         await yieldToUI();
@@ -879,6 +1263,12 @@ export function Scanner({ onScanComplete }: ScannerProps) {
         if (!title || hasMetadataLeak(title)) {
           // 1) Dedicated AnimePahe / fansub parser — handles underscore forms
           const local = parseLocalFilename(file.filename);
+          // Debug: log local parser result to help diagnose preview vs dev differences
+          try {
+            console.log('[Scanner][debug] parseLocalFilename', { filename: file.filename, result: local });
+          } catch (e) {
+            /* ignore logging failures */
+          }
           if (local?.title && !hasMetadataLeak(local.title)) {
             title = local.title;
             type = local.type;
@@ -890,7 +1280,10 @@ export function Scanner({ onScanComplete }: ScannerProps) {
 
         if (!title || hasMetadataLeak(title)) {
           try {
-            const parsed = filenameParse(file.filename);
+            // Debug: ensure the parser exists and record input
+            try { console.log('[Scanner][debug] filenameParse typeof', typeof filenameParse, { filename: file.filename }); } catch(e){}
+            const parsed = filenameParse ? filenameParse(file.filename) : null;
+            try { console.log('[Scanner][debug] filenameParse result', parsed); } catch(e){}
             if (parsed && parsed.title && !hasMetadataLeak(parsed.title)) {
               title = parsed.title;
               year = parsed.year ? parseInt(parsed.year, 10) : null;
@@ -902,8 +1295,9 @@ export function Scanner({ onScanComplete }: ScannerProps) {
                 if (showResult.episodes?.length > 0) episode = showResult.episodes[0];
               }
             }
-          } catch {
-            // @ctrl parser optional
+          } catch (err) {
+            // @ctrl parser optional — surface error for preview diagnostics
+            try { console.warn('[Scanner][warn] filenameParse threw', err); } catch (e) {}
           }
         }
 
@@ -1037,6 +1431,25 @@ export function Scanner({ onScanComplete }: ScannerProps) {
 
         if (matchedItem) {
           matchedItems.push(matchedItem);
+
+          // Diagnostic log: matched item from parse/search
+          try {
+            console.log(`[Scanner] Matched item: ${matchedItem.id} - ${matchedItem.title}`);
+          } catch (e) {
+            /* ignore logging failures */
+          }
+
+          // Persist match immediately to reduce race conditions with modal/foreground state
+          try {
+            // await here so we know persistence succeeded for this item
+            // Note: storageService.addItem merges files for existing items
+            // and returns the updated library array.
+            const persisted = await storageService.addItem(matchedItem);
+            try { console.log(`[Scanner] Persisted matched item: ${matchedItem.id} (library now ${persisted.length})`); } catch (e) {}
+          } catch (err) {
+            console.error('[Scanner] Failed to persist matched item', matchedItem.id, err);
+          }
+
           setProgress((prev) => ({
             ...prev,
             matched: (prev.matched ?? 0) + 1,
@@ -1087,12 +1500,45 @@ export function Scanner({ onScanComplete }: ScannerProps) {
 
       // Save library BEFORE flipping to complete so UI can't race
       // (also saves partial matches if the user cancelled mid-scan)
-      await Promise.resolve(
-        onScanComplete({
-          matched: matchedItems,
-          unmatched: unmatchedFiles,
-        }),
-      );
+      // Persist final scan summary so the ScannerScreen can restore full state
+      try {
+        // Ensure library persistence even if parent onScanComplete is not available
+        if (matchedItems.length > 0) {
+          try { await storageService.addItems(matchedItems); } catch (e) { console.error('[Scanner] addItems final persist failed', e); }
+        }
+
+        const totalFiles = files.length;
+        const skippedCount = (typeof skippedShort === 'number' ? skippedShort : 0) + (typeof skippedExists === 'number' ? skippedExists : 0);
+        const scannedCount = skippedCount + matchedItems.length + unmatchedFiles.length;
+
+        const summary = {
+          timestamp: new Date().toISOString(),
+          progress: {
+            total: totalFiles,
+            processed: scannedCount,
+            scanned: scannedCount,
+            matched: matchedItems.length,
+            added: matchedItems.length,
+            skipped: skippedCount,
+            phase: 'complete',
+          },
+          matched: matchedItems.map((m) => ({ id: m.id, title: m.title, posterUrl: m.posterUrl, filename: m.localFile?.filename })),
+          unmatched: unmatchedFiles.map((u) => ({ uri: u.uri, filename: u.filename })),
+        };
+        try { await storageService.saveLastScanResult(summary as any); } catch (e) { /* ignore */ }
+
+        // Also mark global scan status complete so other screens (FAB) show checkmark
+        try { await storageService.saveScanStatus('complete'); } catch (e) { /* ignore */ }
+      } catch (e) {
+        console.error('[Scanner] failed to persist last scan summary', e);
+      }
+
+      try {
+        await Promise.resolve(onScanComplete({ matched: matchedItems, unmatched: unmatchedFiles }));
+      } catch (e) {
+        // parent may be unmounted — that's fine, we've already persisted
+        console.warn('[Scanner] onScanComplete failed (parent may be unmounted):', e);
+      }
 
       for (const n of pendingNotifications) {
         try {
@@ -1105,6 +1551,7 @@ export function Scanner({ onScanComplete }: ScannerProps) {
       setProgress((prev) => ({ ...prev, phase: "complete", currentFile: "" }));
       setScanState("complete");
       setHasScanned(true);
+      try { void notifyScanAway('complete', { matchedCount: matchedItems.length, unmatchedCount: unmatchedFiles.length }); } catch (e) { /* ignore */ }
     } catch (err) {
       console.error("[Scanner] runScan fatal error:", err);
       setScanState("error");
@@ -1118,8 +1565,10 @@ export function Scanner({ onScanComplete }: ScannerProps) {
       }
     } finally {
       scanningRef.current = false;
-    }
-  };
+      // Ensure cancel flag is reset after a scan finishes so the next scan starts clean
+      cancelRequestedRef.current = false;
+    };  };
+
 
   const renderContent = () => {
     switch (scanState) {
@@ -1143,11 +1592,13 @@ export function Scanner({ onScanComplete }: ScannerProps) {
                   pressed && { opacity: 0.75 },
                 ]}
               >
-                <Sparkles
-                  size={18}
-                  color={aiEnabled ? "#4ade80" : "#71717a"}
-                  strokeWidth={2.2}
-                />
+                <Animated.View style={animatedAiStyle}>
+                  <Sparkles
+                    size={18}
+                    color={aiEnabled ? "#4ade80" : "#71717a"}
+                    strokeWidth={2.2}
+                  />
+                </Animated.View>
               </Pressable>
             </View>
 
@@ -1193,18 +1644,12 @@ export function Scanner({ onScanComplete }: ScannerProps) {
               </Pressable>
             </View>
 
-            <View style={styles.scanningTips}>
-              <Zap size={13} color="#71717a" />
-              <Text style={styles.tipText}>Clean names work best.</Text>
-            </View>
+            <ScansDrawer isProLocal={isPro} scansRemainingLocal={scansRemaining} />
           </View>
         );
 
       case "scanning": {
-        const percent =
-          progress.total && progress.total > 0
-            ? (progress.processed ?? 0) / progress.total
-            : 0;
+        const percent = displayedPercent;
         return (
           <View style={[styles.content, styles.scanningContent]}>
             <View style={[styles.iconRing, styles.iconRingScanning, styles.scanningIcon]}>
@@ -1213,11 +1658,7 @@ export function Scanner({ onScanComplete }: ScannerProps) {
 
             <Text style={styles.heading}>Scanning</Text>
 
-            {/* Stay-on-screen banner */}
-            <View style={styles.stayOnScreenBanner}>
-              <AlertTriangle size={14} color="#fbbf24" strokeWidth={2.5} />
-              <Text style={styles.stayOnScreenText}>Stay here until done</Text>
-            </View>
+
 
             <View style={styles.progressPanel}>
               <View style={styles.progressHeader}>
@@ -1262,11 +1703,6 @@ export function Scanner({ onScanComplete }: ScannerProps) {
               </View>
             </View>
 
-            {aiEnabled ? (
-              <BlinkingText text="AI working…" />
-            ) : (
-              <BlinkingText text="Matching…" />
-            )}
 
             <CancelButton
               countdown={cancelCountdown}
@@ -1369,9 +1805,13 @@ export function Scanner({ onScanComplete }: ScannerProps) {
         statusBarTranslucent
         onRequestClose={() => {
           if (disambiguation) {
-            const r = disambiguation.resolve;
+            const id = disambiguation.id;
             setDisambiguation(null);
-            r(null);
+            const resolver = id ? pendingDisambiguationResolves.get(id) : undefined;
+            try { AsyncStorage.removeItem(PENDING_DISAMBIG_KEY); } catch (e) {}
+            if (resolver) {
+              resolver(null);
+            }
           }
         }}
       >
@@ -1417,9 +1857,13 @@ export function Scanner({ onScanComplete }: ScannerProps) {
                       pressed && styles.disambigCardPressed,
                     ]}
                     onPress={() => {
-                      const r = disambiguation.resolve;
+                      const id = disambiguation?.id;
                       setDisambiguation(null);
-                      r(option.id);
+                      const resolver = id ? pendingDisambiguationResolves.get(id) : undefined;
+                      try { AsyncStorage.removeItem(PENDING_DISAMBIG_KEY); } catch (e) {}
+                      if (resolver) {
+                        resolver(option.id);
+                      }
                     }}
                     accessibilityRole="button"
                     accessibilityLabel={`${option.title}, ${option.year}`}
@@ -1452,10 +1896,12 @@ export function Scanner({ onScanComplete }: ScannerProps) {
             <Pressable
               style={styles.disambigSkipBtn}
               onPress={() => {
-                if (disambiguation) {
-                  const r = disambiguation.resolve;
-                  setDisambiguation(null);
-                  r(null);
+                const id = disambiguation?.id;
+                setDisambiguation(null);
+                const resolver = id ? pendingDisambiguationResolves.get(id) : undefined;
+                try { AsyncStorage.removeItem(PENDING_DISAMBIG_KEY); } catch (e) {}
+                if (resolver) {
+                  resolver(null);
                 }
               }}
               accessibilityRole="button"
@@ -1781,6 +2227,35 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "600",
     flex: 1,
+  },
+  scansDrawerWrap: {
+    width: "100%",
+    marginTop: 2,
+  },
+  scansDrawerHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: "rgba(255,255,255,0.04)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+  },
+  scansHeaderText: {
+    color: "#71717a",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  scansDrawerBody: {
+    paddingHorizontal: 12,
+    paddingTop: 10,
+  },
+  scansBodyText: {
+    color: "#a1a1aa",
+    fontSize: 12,
+    lineHeight: 18,
   },
   iconRingOrange: {
     backgroundColor: "rgba(249,115,22,0.12)",

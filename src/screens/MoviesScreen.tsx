@@ -1,13 +1,15 @@
 import React, { useState, useCallback, useEffect, useMemo } from "react";
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { View, Text, StyleSheet, ActivityIndicator, FlatList, RefreshControl, Pressable } from "react-native";
 import { useNavigation, useFocusEffect } from "@react-navigation/native";
 import { storageService } from "../storage/asyncStorage";
 import { MediaItem } from "../types";
 import { MediaCard } from "../components/MediaCard";
 import { FloatingHeader } from "../components/FloatingHeader";
+import { ScanFab } from "../components/ScanFab";
 import Animated, { useSharedValue , FadeIn } from "react-native-reanimated";
 import { Film, ScanLine } from "lucide-react-native";
-import { watchProgressService } from "../storage/watchProgressService";
+import { watchProgressService, setOnProgressChanged } from "../storage/watchProgressService";
 
 function MoviesEmptyState() {
   const navigation = useNavigation<any>();
@@ -22,7 +24,7 @@ function MoviesEmptyState() {
       </Text>
       <Pressable
         style={styles.emptyCta}
-        onPress={() => navigation.navigate("MainTabs", { screen: "Scan" })}
+        onPress={() => navigation.navigate('Scanner')}
       >
         <ScanLine size={16} color="#000000" strokeWidth={2.2} />
         <Text style={styles.emptyCtaText}>Go to Scanner</Text>
@@ -39,6 +41,25 @@ export function MoviesScreen() {
   const [lastPlayedMap, setLastPlayedMap] = useState<Record<string, string | null>>({});
   const navigation = useNavigation<any>();
   const scrollY = useSharedValue(0);
+  const [scannerVisible, setScannerVisible] = useState(true);
+  const lastScrollY = React.useRef(0);
+
+  // Keep scanner visibility in sync across Movies/TV by persisting and subscribing
+  useEffect(() => {
+    let mounted = true;
+    void (async () => {
+      try {
+        const v = await storageService.getScanFabVisibility();
+        if (mounted) setScannerVisible(!!v);
+      } catch (e) { /* ignore */ }
+    })();
+    storageService.setOnScanFabVisibilityChanged((v) => {
+      if (mounted) setScannerVisible(!!v);
+    });
+    return () => { mounted = false; storageService.setOnScanFabVisibilityChanged(null); };
+  }, []);
+
+  const insets = useSafeAreaInsets();
 
   const loadData = useCallback(async () => {
     const data = await storageService.getLibrary();
@@ -71,6 +92,27 @@ export function MoviesScreen() {
     };
 
     void fetchLastPlayed();
+  }, [items]);
+
+  // Re-fetch last-played map when watch progress changes (markAsPlayed/save/clear)
+  useEffect(() => {
+    const handler = () => {
+      if (items.length === 0) return;
+      const fetchLastPlayed = async () => {
+        const map: Record<string, string | null> = {};
+        await Promise.all(
+          items.map(async (item) => {
+            const files = item.localFiles ?? (item.localFile ? [item.localFile] : []);
+            const lastPlayed = await watchProgressService.getLastPlayedAt(item.id, files);
+            map[item.id] = lastPlayed;
+          })
+        );
+        setLastPlayedMap(map);
+      };
+      void fetchLastPlayed();
+    };
+    setOnProgressChanged(handler);
+    return () => { setOnProgressChanged(null); };
   }, [items]);
 
   // Sort items by last played (most recent first)
@@ -106,12 +148,26 @@ export function MoviesScreen() {
         data={sortedItems}
         keyExtractor={(item) => item.id}
         renderItem={({ item, index }) => <MediaCard item={item} index={index} />}
-        contentContainerStyle={[styles.list, { paddingTop: headerHeight + 24 }]}
+        contentContainerStyle={[styles.list, { paddingTop: headerHeight + 24, paddingBottom: insets.bottom + 24 }]}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#ffffff" />
         }
         showsVerticalScrollIndicator={false}
         ListEmptyComponent={<MoviesEmptyState />}
+        onScroll={(e) => {
+          const y = e.nativeEvent.contentOffset.y;
+          const dy = y - lastScrollY.current;
+          // If scrolling up (dy < -5) show scanner; scrolling down (dy > 5) hide it
+          if (dy < -5 && !scannerVisible) {
+            setScannerVisible(true);
+            void storageService.saveScanFabVisibility(true);
+          } else if (dy > 5 && scannerVisible) {
+            setScannerVisible(false);
+            void storageService.saveScanFabVisibility(false);
+          }
+          lastScrollY.current = y;
+        }}
+        scrollEventThrottle={16}
       />
       <FloatingHeader
         title="Movies"
@@ -121,6 +177,7 @@ export function MoviesScreen() {
         onSearchPress={() => navigation.navigate("Search")}
         showLogo
       />
+      <ScanFab visible={scannerVisible} />
     </View>
   );
 }

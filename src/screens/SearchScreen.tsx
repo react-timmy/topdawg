@@ -9,19 +9,25 @@ import {
   Pressable,
   StatusBar,
 } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ChevronLeft, Search, X } from 'lucide-react-native';
 import { storageService } from '../storage/asyncStorage';
-import { MediaItem } from '../types';
+import { MediaItem, RootStackParamList } from '../types';
 import { MediaCard } from '../components/MediaCard';
+
+type SearchScreenRouteProp = RouteProp<RootStackParamList, 'Search'>;
 
 export function SearchScreen() {
   const navigation = useNavigation<any>();
+  const route = useRoute<SearchScreenRouteProp>();
   const insets = useSafeAreaInsets();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(false);
+
+  // Get the optional onSelect callback from route params
+  const onSelect = route.params?.onSelect;
 
   const handleSearch = async (text: string) => {
     setQuery(text);
@@ -50,6 +56,17 @@ export function SearchScreen() {
   const clearQuery = () => {
     setQuery('');
     setResults([]);
+  };
+
+  const handleItemPress = (item: MediaItem) => {
+    if (onSelect) {
+      // If there's a callback, invoke it and go back
+      onSelect(item);
+      navigation.goBack();
+    } else {
+      // Default behavior: navigate to Details
+      navigation.navigate('Details', { item });
+    }
   };
 
   return (
@@ -90,7 +107,9 @@ export function SearchScreen() {
         <FlatList
           data={results}
           keyExtractor={(item) => item.id}
-          renderItem={({ item, index }) => <MediaCard item={item} index={index} />}
+          renderItem={({ item, index }) => (
+            <MediaCard item={item} index={index} onPress={() => handleItemPress(item)} />
+          )}
           contentContainerStyle={[styles.list, { paddingBottom: insets.bottom + 24 }]}
           keyboardDismissMode="on-drag"
           keyboardShouldPersistTaps="handled"
