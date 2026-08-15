@@ -121,7 +121,7 @@ function CustomTabBar({ state, navigation }: BottomTabBarProps) {
                   const parentState = (parentNav as any).getState?.();
                   const hasMainTabs = Array.isArray(parentState?.routeNames) && parentState.routeNames.includes('MainTabs');
                   if (hasMainTabs) {
-                    parentNav.navigate('MainTabs' as never, { screen: route.name } as never);
+                    (parentNav as any).navigate('MainTabs', { screen: route.name });
                   } else {
                     parentNav.navigate(route.name as never);
                   }

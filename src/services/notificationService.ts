@@ -246,7 +246,7 @@ export async function showDisambiguationNotification(payload: { filename: string
       content: {
         title: `Which match for ${payload.filename}?`,
         body: `Tap to open app and choose the correct match (${payload.optionsCount ?? 0} choices).`,
-        data: { screen: 'Scanner', action: 'disambiguate', entryId: entry.id },
+        data: { screen: 'Scanner', action: 'disambiguate', entryId: payload.entryId },
         ...(Platform.OS === 'android' && { channelId: 'scan' }),
       },
       trigger: { type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL, seconds: 1 },

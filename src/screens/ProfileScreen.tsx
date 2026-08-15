@@ -444,9 +444,9 @@ export function ProfileScreen() {
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
-const CARD_BG     = 'rgba(255,255,255,0.04)';
-const CARD_BORDER = 'rgba(255,255,255,0.07)';
-const BAR_TRACK   = 'rgba(255,255,255,0.12)';
+const CARD_BG     = 'rgba(255,255,255,0.03)';
+const CARD_BORDER = 'rgba(255,255,255,0.06)';
+const BAR_TRACK   = 'rgba(255,255,255,0.06)';
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#000000' },
@@ -468,100 +468,99 @@ const styles = StyleSheet.create({
   },
   headerIconLockBadge: {
     position: 'absolute',
-    // tiny outward offset so the dot sits just outside the avatar
-    bottom: -3,
-    right: -3,
-    width: 16,
-    height: 16,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  headerSyncDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 7,
-    borderWidth: 1,
-    borderColor: 'rgba(0,0,0,0.25)'
-  },
-
-  headerTitle: { fontSize: 28, fontWeight: '800', letterSpacing: -0.4, color: '#ffffff' },
-  headerSubtitle: { fontSize: 12, color: '#52525b', marginTop: 1 },
-  settingsBtn: {
-    marginLeft: 'auto', width: 36, height: 36,
+    bottom: -3, right: -3,
+    width: 16, height: 16, borderRadius: 8,
     alignItems: 'center', justifyContent: 'center',
   },
-  headerBorder: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 1, backgroundColor: CARD_BORDER },
+  headerSyncDot: {
+    width: 10, height: 10, borderRadius: 7,
+    borderWidth: 1, borderColor: 'rgba(0,0,0,0.25)'
+  },
+
+  headerTitle: { fontSize: 26, fontWeight: '800', letterSpacing: -0.4, color: '#ffffff' },
+  headerSubtitle: { fontSize: 11, color: '#52525b', marginTop: 1 },
+  settingsBtn: {
+    marginLeft: 'auto', width: 38, height: 38,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 19,
+  },
+  headerBorder: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 1, backgroundColor: 'rgba(255,255,255,0.04)' },
 
   headerSmallAvatar: {
     width: 38, height: 38, borderRadius: 19, overflow: 'hidden',
   },
 
   // ── Scroll ──
-  scroll: { paddingHorizontal: CARD_PADDING, gap: 12 },
+  scroll: { paddingHorizontal: CARD_PADDING, gap: 16 },
 
   // ── Card ──
   card: {
     backgroundColor: CARD_BG, borderWidth: 1, borderColor: CARD_BORDER,
-    borderRadius: 12, padding: 16,
+    borderRadius: 20, padding: 20,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.4, shadowRadius: 16, elevation: 10,
   },
-  // Used as a standalone heading — keeps its own bottom margin
-  sectionTitle: { fontSize: 15, fontWeight: '700', color: '#ffffff', marginBottom: 14, letterSpacing: 0.1 },
-  // Used when an icon sits beside the title — margin lives on the ROW, not the text
-  sectionTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 14 },
-  // Title text variant for use inside sectionTitleRow — no bottom margin so it
-  // aligns vertically with the icon rather than being pushed down by it
-  sectionTitleInRow: { fontSize: 15, fontWeight: '700', color: '#ffffff', letterSpacing: 0.1 },
+  sectionTitle: { fontSize: 16, fontWeight: '800', color: '#ffffff', marginBottom: 16, letterSpacing: 0.2 },
+  sectionTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 16 },
+  sectionTitleInRow: { fontSize: 16, fontWeight: '800', color: '#ffffff', letterSpacing: 0.2 },
 
   // ── Pro CTA ──
   proCtaCard: {
-    flexDirection: 'row', alignItems: 'center', gap: 12,
+    flexDirection: 'row', alignItems: 'center', gap: 14,
     backgroundColor: 'rgba(167,139,250,0.08)',
-    borderWidth: 1, borderColor: 'rgba(167,139,250,0.22)',
-    borderRadius: 12, padding: 14,
+    borderWidth: 1, borderColor: 'rgba(167,139,250,0.3)',
+    borderRadius: 20, padding: 18,
+    shadowColor: '#a78bfa', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15, shadowRadius: 12, elevation: 8,
   },
   proCtaIconRing: {
-    width: 36, height: 36, borderRadius: 10,
+    width: 44, height: 44, borderRadius: 14,
     backgroundColor: 'rgba(167,139,250,0.15)',
     alignItems: 'center', justifyContent: 'center',
   },
-  proCtaTitle: { fontSize: 13, fontWeight: '700', color: '#e4e4e7' },
-  proCtaSubtitle: { fontSize: 11, color: '#71717a', marginTop: 2 },
+  proCtaTitle: { fontSize: 14, fontWeight: '800', color: '#f3e8ff' },
+  proCtaSubtitle: { fontSize: 12, color: '#a78bfa', marginTop: 4, fontWeight: '500' },
 
   // ── HeroStats (identity + watch time) ──
   heroCard: {
     backgroundColor: CARD_BG, borderWidth: 1, borderColor: CARD_BORDER,
-    borderRadius: 16, padding: 16, gap: 0,
+    borderRadius: 24, padding: 24, gap: 0,
+    shadowColor: '#000000', shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.5, shadowRadius: 24, elevation: 12,
   },
   heroDividerLine: {
-    height: 1, backgroundColor: CARD_BORDER, marginVertical: 16,
+    height: 1, backgroundColor: 'rgba(255,255,255,0.05)', marginVertical: 20,
   },
   heroHoursLabel: {
-    fontSize: 11, fontWeight: '600', color: '#52525b',
-    textTransform: 'uppercase', letterSpacing: 1, textAlign: 'center', marginBottom: 4,
+    fontSize: 12, fontWeight: '800', color: '#a1a1aa',
+    textTransform: 'uppercase', letterSpacing: 2, textAlign: 'center', marginBottom: 6,
   },
   heroHours: {
-    fontSize: 44, fontWeight: '800', color: '#ffffff',
-    textAlign: 'center', letterSpacing: -1, marginBottom: 6,
+    fontSize: 56, fontWeight: '900', color: '#ffffff',
+    textAlign: 'center', letterSpacing: -2, marginBottom: 8,
+    textShadowColor: 'rgba(255,255,255,0.15)', textShadowOffset: { width: 0, height: 4 }, textShadowRadius: 16,
   },
-  watchingSince: { fontSize: 11, color: '#3f3f46', textAlign: 'center', marginBottom: 16, fontWeight: '600' },
+  watchingSince: { fontSize: 12, color: '#71717a', textAlign: 'center', marginBottom: 24, fontWeight: '600', letterSpacing: 0.5 },
   heroRow: { flexDirection: 'row', alignItems: 'center' },
-  heroStatCell: { flex: 1, alignItems: 'center', gap: 4 },
-  heroStatValue: { fontSize: 26, fontWeight: '800', color: '#ffffff', letterSpacing: -0.5 },
+  heroStatCell: { flex: 1, alignItems: 'center', gap: 6 },
+  heroStatValue: { fontSize: 32, fontWeight: '900', color: '#ffffff', letterSpacing: -1 },
   heroStatLabel: {
-    fontSize: 11, color: '#71717a', fontWeight: '600',
-    textTransform: 'uppercase', letterSpacing: 0.8,
+    fontSize: 12, color: '#a1a1aa', fontWeight: '800',
+    textTransform: 'uppercase', letterSpacing: 1.2,
   },
-  heroDivider: { width: 1, height: 40, backgroundColor: CARD_BORDER },
+  heroDivider: { width: 1, height: 48, backgroundColor: 'rgba(255,255,255,0.05)' },
   streakPill: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
+    flexDirection: 'row', alignItems: 'center', gap: 6,
     alignSelf: 'center',
-    backgroundColor: 'rgba(245,158,11,0.12)',
-    borderWidth: 1, borderColor: 'rgba(245,158,11,0.25)',
-    borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4,
-    marginBottom: 12,
+    backgroundColor: 'rgba(245,158,11,0.15)',
+    borderWidth: 1, borderColor: 'rgba(245,158,11,0.4)',
+    borderRadius: 24, paddingHorizontal: 14, paddingVertical: 6,
+    marginBottom: 18,
+    shadowColor: '#f59e0b', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25, shadowRadius: 12, elevation: 8,
   },
-  streakText: { fontSize: 12, fontWeight: '700', color: '#f59e0b' },
+  streakText: { fontSize: 13, fontWeight: '800', color: '#fbbf24', letterSpacing: 0.5 },
   weekRow: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     marginTop: 14, paddingTop: 12, borderTopWidth: 1, borderTopColor: CARD_BORDER,

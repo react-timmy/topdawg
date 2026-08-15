@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { View, Pressable, StyleSheet } from 'react-native';
-import Animated, { useSharedValue, useAnimatedStyle, withTiming, withRepeat, Easing } from 'react-native-reanimated';
+import Animated, { useSharedValue, useAnimatedStyle, withTiming, withRepeat, withSequence, withDelay, Easing } from 'react-native-reanimated';
 import { useNavigation } from '@react-navigation/native';
 import { BlurView } from 'expo-blur';
 import { ScanLine, Check } from 'lucide-react-native';
@@ -16,10 +16,14 @@ export function ScanFab({ visible = true }: { visible?: boolean }) {
   const [status, setStatus] = useState<string | null>(null);
 
   const btnScale = useSharedValue(1);
-  const ring1Scale = useSharedValue(0);
-  const ring1Opacity = useSharedValue(0.18);
-  const ring2Scale = useSharedValue(0);
-  const ring2Opacity = useSharedValue(0.12);
+  const ringOpacity = useSharedValue(0.12);
+
+  // Orbit rotations
+  const orbitRot1 = useSharedValue(0);
+  const orbitRot2 = useSharedValue(0);
+
+  // Streaming data progress
+  const streamProg = useSharedValue(0);
 
   useEffect(() => {
     let mounted = true;
@@ -58,22 +62,35 @@ export function ScanFab({ visible = true }: { visible?: boolean }) {
     }
 
     if (status === 'scanning' || status === 'attention') {
-      // pulse the button when active (including attention)
-      btnScale.value = withRepeat(withTiming(1.06, { duration: 700, easing: Easing.inOut(Easing.ease) }), -1, true);
+      const easing = Easing.bezier(0.25, 0.1, 0.25, 1);
 
-      // Ring 1: faster, smaller pulse
-      ring1Scale.value = withRepeat(withTiming(2.0, { duration: 900, easing: Easing.out(Easing.quad) }), -1, false);
-      ring1Opacity.value = withRepeat(withTiming(0.0, { duration: 900, easing: Easing.out(Easing.quad) }), -1, false);
+      // Subtle button breath
+      btnScale.value = withRepeat(
+        withSequence(withTiming(1.05, { duration: 1000, easing }), withTiming(1.0, { duration: 1000, easing })),
+        -1, false
+      );
 
-      // Ring 2: slower, larger pulse
-      ring2Scale.value = withRepeat(withTiming(2.8, { duration: 1400, easing: Easing.out(Easing.quad) }), -1, false);
-      ring2Opacity.value = withRepeat(withTiming(0.0, { duration: 1400, easing: Easing.out(Easing.quad) }), -1, false);
+      // Base ring glow
+      ringOpacity.value = withRepeat(
+        withSequence(withTiming(0.4, { duration: 1000, easing }), withTiming(0.1, { duration: 1000, easing })),
+        -1, false
+      );
+
+      // Orbit 1: Fast clockwise
+      orbitRot1.value = withRepeat(withTiming(360, { duration: 2200, easing: Easing.linear }), -1, false);
+      
+      // Orbit 2: Slower counter-clockwise
+      orbitRot2.value = withRepeat(withTiming(-360, { duration: 3400, easing: Easing.linear }), -1, false);
+
+      // Data stream shooting outwards
+      streamProg.value = withRepeat(withTiming(1, { duration: 1200, easing: Easing.out(Easing.cubic) }), -1, false);
+
     } else {
       btnScale.value = withTiming(1, { duration: 240 });
-      ring1Scale.value = withTiming(0, { duration: 300 });
-      ring1Opacity.value = withTiming(0.18, { duration: 300 });
-      ring2Scale.value = withTiming(0, { duration: 300 });
-      ring2Opacity.value = withTiming(0.12, { duration: 300 });
+      ringOpacity.value = withTiming(0.12, { duration: 300 });
+      orbitRot1.value = 0; // reset
+      orbitRot2.value = 0;
+      streamProg.value = 0;
     }
 
     return () => {
@@ -82,19 +99,51 @@ export function ScanFab({ visible = true }: { visible?: boolean }) {
         completeTimerRef.current = null;
       }
     };
-  }, [status, btnScale, ring1Scale, ring1Opacity, ring2Scale, ring2Opacity]);
+  }, [status, btnScale, ringOpacity, orbitRot1, orbitRot2, streamProg]);
 
   const animatedBtn = useAnimatedStyle(() => ({ transform: [{ scale: btnScale.value }] }));
-  const animatedRing1 = useAnimatedStyle(() => ({ transform: [{ scale: ring1Scale.value }], opacity: ring1Opacity.value }));
-  const animatedRing2 = useAnimatedStyle(() => ({ transform: [{ scale: ring2Scale.value }], opacity: ring2Opacity.value }));
+  const animatedRing = useAnimatedStyle(() => ({ opacity: ringOpacity.value }));
+  const animOrbit1 = useAnimatedStyle(() => ({ transform: [{ rotate: `${orbitRot1.value}deg` }] }));
+  const animOrbit2 = useAnimatedStyle(() => ({ transform: [{ rotate: `${orbitRot2.value}deg` }] }));
+
+  // Stream styles for 4 directions
+  const animStreamUp = useAnimatedStyle(() => ({
+    opacity: status === 'scanning' ? (1 - streamProg.value) : 0,
+    transform: [{ translateY: -30 - (streamProg.value * 45) }]
+  }));
+  const animStreamRight = useAnimatedStyle(() => ({
+    opacity: status === 'scanning' ? (1 - streamProg.value) : 0,
+    transform: [{ translateX: 30 + (streamProg.value * 45) }]
+  }));
+  const animStreamDown = useAnimatedStyle(() => ({
+    opacity: status === 'scanning' ? (1 - streamProg.value) : 0,
+    transform: [{ translateY: 30 + (streamProg.value * 45) }]
+  }));
+  const animStreamLeft = useAnimatedStyle(() => ({
+    opacity: status === 'scanning' ? (1 - streamProg.value) : 0,
+    transform: [{ translateX: -30 - (streamProg.value * 45) }]
+  }));
 
   const isAttention = status === 'attention';
 
   return (
     <View pointerEvents="box-none" style={[styles.outer, { right: -55, bottom: -61 }] }>
-      {/* Blue/yellow fading rings behind the FAB */}
-      <Animated.View style={[styles.ringPulse, isAttention && styles.ringAttention, animatedRing2]} pointerEvents="none" />
-      <Animated.View style={[styles.ringPulse, styles.ringPulseSmall, isAttention && styles.ringAttentionSmall, animatedRing1]} pointerEvents="none" />
+      {/* Base glow ring */}
+      <Animated.View style={[styles.ringBase, isAttention && styles.ringAttention, animatedRing]} pointerEvents="none" />
+
+      {/* Orbit Rings (only visible when scanning/attention) */}
+      <Animated.View style={[styles.orbitContainer, animOrbit1, (status !== 'scanning' && !isAttention) && {opacity: 0}]} pointerEvents="none">
+        <View style={styles.orbitDot} />
+      </Animated.View>
+      <Animated.View style={[styles.orbitContainerRev, animOrbit2, (status !== 'scanning' && !isAttention) && {opacity: 0}]} pointerEvents="none">
+        <View style={styles.orbitDotSmall} />
+      </Animated.View>
+
+      {/* Data Stream Particles */}
+      <Animated.View style={[styles.streamDot, animStreamUp]} pointerEvents="none" />
+      <Animated.View style={[styles.streamDot, animStreamRight]} pointerEvents="none" />
+      <Animated.View style={[styles.streamDot, animStreamDown]} pointerEvents="none" />
+      <Animated.View style={[styles.streamDot, animStreamLeft]} pointerEvents="none" />
 
       <Animated.View style={animatedBtn}>
         <Pressable
@@ -168,23 +217,58 @@ const styles = StyleSheet.create({
     shadowRadius: 18,
     elevation: 12,
   },
-  ringPulse: {
+  ringBase: {
+    position: 'absolute',
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: 'rgba(255, 255, 255, 0.4)',
+  },
+  ringAttention: {
+    backgroundColor: 'rgba(250,204,21,0.28)'
+  },
+  orbitContainer: {
+    position: 'absolute',
+    width: 110,
+    height: 110,
+    alignItems: 'center', // top
+    justifyContent: 'flex-start',
+    zIndex: 130,
+  },
+  orbitContainerRev: {
     position: 'absolute',
     width: 140,
     height: 140,
-    borderRadius: 70,
-    backgroundColor: 'rgba(96, 165, 250, 0.22)',
+    alignItems: 'flex-end', // right
+    justifyContent: 'center',
+    zIndex: 130,
   },
-  ringPulseSmall: {
-    width: 110,
-    height: 110,
-    borderRadius: 55,
-    backgroundColor: 'rgba(96, 165, 250, 0.32)',
+  orbitDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+    backgroundColor: '#ffffff',
+    shadowColor: '#ffffff',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1,
+    shadowRadius: 6,
+    elevation: 4,
   },
-  ringAttention: {
-    backgroundColor: 'rgba(250,204,21,0.22)'
+  orbitDotSmall: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#60a5fa', // slight blue tint
+    shadowColor: '#60a5fa',
+    shadowOpacity: 1,
+    shadowRadius: 5,
   },
-  ringAttentionSmall: {
-    backgroundColor: 'rgba(250,204,21,0.28)'
+  streamDot: {
+    position: 'absolute',
+    width: 3,
+    height: 3,
+    borderRadius: 1.5,
+    backgroundColor: '#ffffff',
+    opacity: 0.8,
   },
 });
