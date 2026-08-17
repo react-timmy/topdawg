@@ -425,17 +425,26 @@ export function DetailsScreen() {
 
       const isAnime = initialItem.id.startsWith('anime:');
 
-      const [details, trailer, providers, similar] = await Promise.all([
-        tmdbService.getDetails(initialItem.id, initialItem.type),
-        tmdbService.getTrailerUrl(initialItem.id, initialItem.type),
-        tmdbService.getWatchProviders(
-          initialItem.id,
-          initialItem.type,
-          activeItem.title,
-          { isAnime },
-        ),
-        tmdbService.getSimilar(initialItem.id, initialItem.type, 5),
-      ]);
+      let details: any = {};
+      let trailer: string | null = null;
+      let providers: WatchProvider[] = [];
+      let similar: MediaItem[] = [];
+
+      try {
+        [details, trailer, providers, similar] = await Promise.all([
+          tmdbService.getDetails(initialItem.id, initialItem.type),
+          tmdbService.getTrailerUrl(initialItem.id, initialItem.type),
+          tmdbService.getWatchProviders(
+            initialItem.id,
+            initialItem.type,
+            activeItem.title,
+            { isAnime },
+          ),
+          tmdbService.getSimilar(initialItem.id, initialItem.type, 5),
+        ]);
+      } catch (e) {
+        console.warn('Network error fetching TMDB details:', e);
+      }
       if (cancelled) return;
 
       const mergedItem = { ...activeItem, ...details };

@@ -44,7 +44,7 @@ import { useAccount } from "../context/AccountContext";
 import { MediaItem } from "../types";
 import { CloudStarredEntry } from "../storage/cloudStarredService";
 import { FloatingHeader } from "./FloatingHeader";
-import { watchProgressService, setOnProgressChanged } from "../storage/watchProgressService";
+import { watchProgressService, addProgressChangeListener, removeProgressChangeListener } from "../storage/watchProgressService";
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
 const GRID_ITEM_WIDTH = (SCREEN_WIDTH - 48 - 12) / 2; // 2-col grid with padding and gap
@@ -843,14 +843,14 @@ export function LibraryView({
 
     void fetchLastPlayed();
 
-    // Refresh when any progress changes (markAsPlayed / save / clear)
-    setOnProgressChanged(() => {
+    const handler = () => {
       void fetchLastPlayed();
-    });
+    };
+    addProgressChangeListener(handler);
 
     return () => {
       mounted = false;
-      setOnProgressChanged(null);
+      removeProgressChangeListener(handler);
     };
   }, [items]);
 

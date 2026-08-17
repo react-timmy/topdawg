@@ -313,7 +313,10 @@ export function ProPaywallModal({
       </Modal>
       <ProCodeModal
         visible={codeModalOpen}
-        onClose={() => setCodeModalOpen(false)}
+        onClose={() => {
+          setCodeModalOpen(false);
+          onClose();
+        }}
         onSuccess={handleCodeSuccess}
       />
     </>

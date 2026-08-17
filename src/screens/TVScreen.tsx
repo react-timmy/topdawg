@@ -9,7 +9,7 @@ import { FloatingHeader } from "../components/FloatingHeader";
 import { ScanFab } from "../components/ScanFab";
 import Animated, { useSharedValue , FadeIn } from "react-native-reanimated";
 import { Tv, ScanLine } from "lucide-react-native";
-import { watchProgressService, setOnProgressChanged } from "../storage/watchProgressService";
+import { watchProgressService, addProgressChangeListener, removeProgressChangeListener } from "../storage/watchProgressService";
 
 function TVEmptyState() {
   const navigation = useNavigation<any>();
@@ -93,14 +93,14 @@ export function TVScreen() {
 
     void fetchLastPlayed();
 
-    // Refresh when any progress changes (markAsPlayed / save / clear)
-    setOnProgressChanged(() => {
+    const handler = () => {
       void fetchLastPlayed();
-    });
+    };
+    addProgressChangeListener(handler);
 
     return () => {
       mounted = false;
-      setOnProgressChanged(null);
+      removeProgressChangeListener(handler);
     };
   }, [trending]);
 

@@ -40,15 +40,20 @@ async function writeAll(map: Record<string, WatchProgress>): Promise<void> {
   try {
     await AsyncStorage.setItem(PROGRESS_KEY, JSON.stringify(map));
     // Notify listeners that progress changed (e.g., lastPlayedAt updated)
-    try { _onProgressChanged?.(); } catch (e) { /* ignore listener errors */ }
+    _progressListeners.forEach(cb => {
+      try { cb(); } catch(e) { /* ignore listener errors */ }
+    });
   } catch (err) {
     console.warn('[WatchProgress] save failed', err);
   }
 }
 
-let _onProgressChanged: (() => void) | null = null;
-export function setOnProgressChanged(cb: (() => void) | null) {
-  _onProgressChanged = cb;
+const _progressListeners = new Set<() => void>();
+export function addProgressChangeListener(cb: () => void) {
+  _progressListeners.add(cb);
+}
+export function removeProgressChangeListener(cb: () => void) {
+  _progressListeners.delete(cb);
 }
 
 export const watchProgressService = {

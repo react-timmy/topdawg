@@ -183,10 +183,8 @@ export async function showScanNotification(progress: { phase?: string; processed
         ...(Platform.OS === 'android' && { channelId: 'scan' }),
       },
       trigger: null,
+      identifier: 'filmsort-scan-progress',
     };
-    if (_lastScanNotificationId) {
-      scheduleOpts.identifier = _lastScanNotificationId;
-    }
 
     const id = await Notifications.scheduleNotificationAsync(scheduleOpts);
     _lastScanNotificationId = id;
@@ -214,8 +212,8 @@ export async function showScanCompleteNotification(summary: { matchedCount: numb
         ...(Platform.OS === 'android' && { channelId: 'scan' }),
       },
       trigger: null,
+      identifier: 'filmsort-scan-progress',
     };
-    if (_lastScanNotificationId) scheduleOpts.identifier = _lastScanNotificationId;
     const id = await Notifications.scheduleNotificationAsync(scheduleOpts);
     _lastScanNotificationId = id;
     return id;

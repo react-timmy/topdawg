@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { View, Pressable, StyleSheet } from 'react-native';
-import Animated, { useSharedValue, useAnimatedStyle, withTiming, withRepeat, withSequence, withDelay, Easing } from 'react-native-reanimated';
+import Animated, { useSharedValue, useAnimatedStyle, withTiming, withSpring, withRepeat, withSequence, withDelay, Easing } from 'react-native-reanimated';
 import { useNavigation } from '@react-navigation/native';
 import { BlurView } from 'expo-blur';
 import { ScanLine, Check } from 'lucide-react-native';
@@ -124,10 +124,25 @@ export function ScanFab({ visible = true }: { visible?: boolean }) {
     transform: [{ translateX: -30 - (streamProg.value * 45) }]
   }));
 
+  const visibilityScale = useSharedValue(visible ? 1 : 0);
+
+  useEffect(() => {
+    if (visible) {
+      visibilityScale.value = withSpring(1, { damping: 14, stiffness: 150 });
+    } else {
+      visibilityScale.value = withTiming(0, { duration: 250, easing: Easing.out(Easing.cubic) });
+    }
+  }, [visible, visibilityScale]);
+
+  const animVisibility = useAnimatedStyle(() => ({
+    transform: [{ scale: visibilityScale.value }],
+    opacity: visibilityScale.value === 0 ? 0 : 1, // just to prevent clicks when hidden if pointerEvents doesn't catch it
+  }));
+
   const isAttention = status === 'attention';
 
   return (
-    <View pointerEvents="box-none" style={[styles.outer, { right: -55, bottom: -61 }] }>
+    <Animated.View pointerEvents={visible ? "box-none" : "none"} style={[styles.outer, { right: -55, bottom: -61 }, animVisibility] }>
       {/* Base glow ring */}
       <Animated.View style={[styles.ringBase, isAttention && styles.ringAttention, animatedRing]} pointerEvents="none" />
 
@@ -159,7 +174,7 @@ export function ScanFab({ visible = true }: { visible?: boolean }) {
               try { nav.navigate('Scanner'); } catch (err) { console.warn('nav to Scanner failed', err); }
             }
           }}
-          style={({ pressed }) => [isAttention ? styles.attentionBtn : styles.btn, pressed && { opacity: 0.86 }, !visible && { opacity: 0 }]}
+          style={({ pressed }) => [isAttention ? styles.attentionBtn : styles.btn, pressed && { opacity: 0.86 }]}
         >
           <BlurView intensity={65} tint={isAttention ? "light" : "dark"} style={StyleSheet.absoluteFillObject} />
           {status === 'complete' ? (
@@ -169,7 +184,7 @@ export function ScanFab({ visible = true }: { visible?: boolean }) {
           )}
         </Pressable>
       </Animated.View>
-    </View>
+    </Animated.View>
   );
 }
 

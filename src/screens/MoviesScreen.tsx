@@ -9,7 +9,7 @@ import { FloatingHeader } from "../components/FloatingHeader";
 import { ScanFab } from "../components/ScanFab";
 import Animated, { useSharedValue , FadeIn } from "react-native-reanimated";
 import { Film, ScanLine } from "lucide-react-native";
-import { watchProgressService, setOnProgressChanged } from "../storage/watchProgressService";
+import { watchProgressService, addProgressChangeListener, removeProgressChangeListener } from "../storage/watchProgressService";
 
 function MoviesEmptyState() {
   const navigation = useNavigation<any>();
@@ -111,8 +111,8 @@ export function MoviesScreen() {
       };
       void fetchLastPlayed();
     };
-    setOnProgressChanged(handler);
-    return () => { setOnProgressChanged(null); };
+    addProgressChangeListener(handler);
+    return () => { removeProgressChangeListener(handler); };
   }, [items]);
 
   // Sort items by last played (most recent first)
