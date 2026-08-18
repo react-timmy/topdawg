@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Image, ImageProps, Platform } from 'react-native';
-import * as FileSystem from 'expo-file-system';
+import { cacheDirectory, makeDirectoryAsync, getInfoAsync, downloadAsync } from 'expo-file-system';
 
 // Simple in-memory maps to avoid duplicate downloads per session
 const localCache = new Map<string, string | null>();
@@ -18,17 +18,17 @@ function djb2Hash(str: string) {
 
 async function downloadToCache(uri: string): Promise<string | null> {
   try {
-    const cacheDir = `${FileSystem.cacheDirectory}images/`;
-    await FileSystem.makeDirectoryAsync(cacheDir, { intermediates: true });
+    const cacheDir = `${cacheDirectory}images/`;
+    await makeDirectoryAsync(cacheDir, { intermediates: true });
     const filename = djb2Hash(uri) + '-' + encodeURIComponent(uri).slice(0, 40);
     const localPath = cacheDir + filename;
 
     // If file already exists, return its uri
-    const info = await FileSystem.getInfoAsync(localPath);
+    const info = await getInfoAsync(localPath);
     if (info.exists) return localPath;
 
     // Download
-    const res = await FileSystem.downloadAsync(uri, localPath);
+    const res = await downloadAsync(uri, localPath);
     if (res && res.status && (res.status >= 200 && res.status < 300)) {
       return res.uri;
     }
@@ -68,7 +68,7 @@ export default function CachedImage({ uri, ...rest }: { uri?: string | null } & 
 
     const p = (async () => {
       // On web, FileSystem.cacheDirectory may be undefined; skip caching
-      if (Platform.OS === 'web' || !FileSystem.cacheDirectory) {
+      if (Platform.OS === 'web' || !cacheDirectory) {
         return null;
       }
       const downloaded = await downloadToCache(uri);
