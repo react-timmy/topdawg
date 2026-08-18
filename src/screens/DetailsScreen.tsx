@@ -47,7 +47,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { RootStackParamList, MediaItem, EpisodeInfo, WatchProvider, LocalFile } from '../types';
+import { RootStackParamList, MediaItem, EpisodeInfo, WatchProvider, LocalFile, UpcomingItem } from '../types';
 import { tmdbService } from '../services/tmdbService';
 import { storageService } from '../storage/asyncStorage';
 import { animeService } from '../services/animeService';
@@ -59,6 +59,7 @@ import { fileLabel } from '../services/fileOrganizeService';
 import { useWatchParty } from '../context/WatchPartyContext';
 import { useAccount } from '../context/AccountContext';
 import { truncateDescription } from '../utils/descriptionUtils';
+import { UpcomingCard } from '../components/UpcomingCard';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const BACKDROP_HEIGHT = SCREEN_HEIGHT * 0.42;
@@ -243,6 +244,7 @@ export function DetailsScreen() {
   const [tvTab, setTvTab] = useState<'episodes' | 'similar'>('episodes');
   const [isWatched, setIsWatched] = useState(false);
   const [expandedDescription, setExpandedDescription] = useState(false);
+  const [upcomingItem, setUpcomingItem] = useState<UpcomingItem | null>(null);
 
   // Identify the latest season for TV shows based on local files
   const latestSeasonNumber = useMemo(() => {
@@ -431,7 +433,7 @@ export function DetailsScreen() {
       let similar: MediaItem[] = [];
 
       try {
-        [details, trailer, providers, similar] = await Promise.all([
+        const [detailsResult, trailerResult, providersResult, similarResult, upcomingResult] = await Promise.all([
           tmdbService.getDetails(initialItem.id, initialItem.type),
           tmdbService.getTrailerUrl(initialItem.id, initialItem.type),
           tmdbService.getWatchProviders(
@@ -441,7 +443,15 @@ export function DetailsScreen() {
             { isAnime },
           ),
           tmdbService.getSimilar(initialItem.id, initialItem.type, 5),
+          tmdbService.getUpcomingForLibrary([activeItem]),
         ]);
+        details = detailsResult;
+        trailer = trailerResult;
+        providers = providersResult;
+        similar = similarResult;
+        if (upcomingResult && upcomingResult.length > 0) {
+          setUpcomingItem(upcomingResult[0]);
+        }
       } catch (e) {
         console.warn('Network error fetching TMDB details:', e);
       }
@@ -874,16 +884,7 @@ export function DetailsScreen() {
                 {item.releaseDate?.split('-')[0] ?? '—'}
               </Text>
 
-              {/* Local file duration */}
-              {item.localFile?.duration ? (
-                <>
-                  <View style={styles.infoStripDot} />
-                  <HardDrive size={11} color="#71717a" />
-                  <Text style={styles.infoStripText}>
-                    {formatDuration(item.localFile.duration)}
-                  </Text>
-                </>
-              ) : null}
+
             </View>
           </Animated.View>
         </View>
@@ -1022,6 +1023,13 @@ export function DetailsScreen() {
               </Pressable>
             )}
           </Animated.View>
+
+          {/* Upcoming Section */}
+          {upcomingItem && (
+            <Animated.View entering={FadeInDown.delay(200).duration(400)}>
+              <UpcomingCard item={upcomingItem} />
+            </Animated.View>
+          )}
 
           {/* ── TV: tabbed episodes / similar ─────────────────────────────── */}
           {item.type === 'tv' && (

@@ -4,7 +4,7 @@ import Animated, { useSharedValue, useAnimatedStyle, withTiming, withSpring, wit
 import { useNavigation } from '@react-navigation/native';
 import { BlurView } from 'expo-blur';
 import { ScanLine, Check } from 'lucide-react-native';
-import { storageService, setOnScanStatusChanged } from '../storage/asyncStorage';
+import { storageService, setOnScanStatusChanged, removeOnScanStatusChanged } from '../storage/asyncStorage';
 
 /**
  * Bottom-right FAB for Scanner. Pulses while scanning, shows check when complete.
@@ -16,7 +16,7 @@ export function ScanFab({ visible = true }: { visible?: boolean }) {
   const [status, setStatus] = useState<string | null>(null);
 
   const btnScale = useSharedValue(1);
-  const ringOpacity = useSharedValue(0.12);
+  const ringOpacity = useSharedValue(0);
 
   // Orbit rotations
   const orbitRot1 = useSharedValue(0);
@@ -31,10 +31,11 @@ export function ScanFab({ visible = true }: { visible?: boolean }) {
       const s = await storageService.getScanStatus();
       if (mounted) setStatus(s);
     })();
-    setOnScanStatusChanged((s) => {
+    const cb = (s: string) => {
       if (mounted) setStatus(s);
-    });
-    return () => { mounted = false; setOnScanStatusChanged(null); };
+    };
+    setOnScanStatusChanged(cb);
+    return () => { mounted = false; removeOnScanStatusChanged(cb); };
   }, []);
 
   const completeTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -87,7 +88,7 @@ export function ScanFab({ visible = true }: { visible?: boolean }) {
 
     } else {
       btnScale.value = withTiming(1, { duration: 240 });
-      ringOpacity.value = withTiming(0.12, { duration: 300 });
+      ringOpacity.value = withTiming(0, { duration: 300 });
       orbitRot1.value = 0; // reset
       orbitRot2.value = 0;
       streamProg.value = 0;

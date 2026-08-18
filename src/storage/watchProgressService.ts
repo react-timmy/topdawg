@@ -103,7 +103,9 @@ export const watchProgressService = {
       return;
     }
 
+    const existing = all[key];
     all[key] = {
+      ...existing,
       ...progress,
       updatedAt: new Date().toISOString(),
     };

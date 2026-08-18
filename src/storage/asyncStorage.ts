@@ -9,19 +9,27 @@ const RECENTLY_MATCHED_MAX = 200;
 
 // Add scan status key and hook definitions after exports (module-scoped)
 const SCAN_STATUS_KEY = '@cinescan:scan_status';
-let _onScanStatusChanged: ((s: string) => void) | null = null;
+let _scanStatusListeners = new Set<(s: string) => void>();
 
 export function setOnScanStatusChanged(cb: ((s: string) => void) | null) {
-  _onScanStatusChanged = cb;
+  if (cb) _scanStatusListeners.add(cb);
+}
+
+export function removeOnScanStatusChanged(cb: (s: string) => void) {
+  _scanStatusListeners.delete(cb);
 }
 
 // Scan FAB visibility key + hook
 const SCAN_FAB_VISIBLE_KEY = '@cinescan:scan_fab_visible';
-let _onScanFabVisibilityChanged: ((v: boolean) => void) | null = null;
+let _scanFabVisibilityListeners = new Set<(v: boolean) => void>();
 let lastSavedVisibility: boolean | null = null;
 
 export function setOnScanFabVisibilityChanged(cb: ((v: boolean) => void) | null) {
-  _onScanFabVisibilityChanged = cb;
+  if (cb) _scanFabVisibilityListeners.add(cb);
+}
+
+export function removeOnScanFabVisibilityChanged(cb: (v: boolean) => void) {
+  _scanFabVisibilityListeners.delete(cb);
 }
 
 // ── Last scan summary persistence ───────────────────────────────────────────
@@ -163,14 +171,62 @@ function mergeItemInto(library: MediaItem[], item: MediaItem): MediaItem[] {
   ];
 }
 
+const INDEX_KEY = '@cinescan:library_index';
+const MEDIA_PREFIX = '@cinescan:media:';
+
+async function migrateIfNecessary(): Promise<void> {
+  try {
+    const oldRaw = await AsyncStorage.getItem(LIBRARY_KEY);
+    if (oldRaw) {
+      const items = JSON.parse(oldRaw) as MediaItem[];
+      const normalized = items.map(normalizeItemId);
+      const ids = normalized.map(i => i.id);
+      
+      const chunks: [string, string][][] = [];
+      let currentChunk: [string, string][] = [[INDEX_KEY, JSON.stringify(ids)]];
+      for (const item of normalized) {
+        currentChunk.push([`${MEDIA_PREFIX}${item.id}`, JSON.stringify(item)]);
+        if (currentChunk.length >= 200) {
+          chunks.push(currentChunk);
+          currentChunk = [];
+        }
+      }
+      if (currentChunk.length > 0) chunks.push(currentChunk);
+      
+      for (const chunk of chunks) {
+        await AsyncStorage.multiSet(chunk);
+      }
+      await AsyncStorage.removeItem(LIBRARY_KEY);
+    }
+  } catch (err) {
+    console.error('[Storage] Migration failed:', err);
+  }
+}
+
 export const storageService = {
   async getLibrary(): Promise<MediaItem[]> {
     try {
-      const raw = await AsyncStorage.getItem(LIBRARY_KEY);
-      if (!raw) return [];
-      const items = JSON.parse(raw) as MediaItem[];
-      // Lazily migrate legacy ids in memory (persisted on next write)
-      return items.map(normalizeItemId);
+      await migrateIfNecessary();
+      
+      const indexRaw = await AsyncStorage.getItem(INDEX_KEY);
+      if (!indexRaw) return [];
+      const ids = JSON.parse(indexRaw) as string[];
+      if (ids.length === 0) return [];
+      
+      const keys = ids.map(id => `${MEDIA_PREFIX}${id}`);
+      const results: [string, string | null][] = [];
+      for (let i = 0; i < keys.length; i += 300) {
+        const batch = await AsyncStorage.multiGet(keys.slice(i, i + 300));
+        results.push(...batch);
+      }
+      
+      const items: MediaItem[] = [];
+      for (const [k, v] of results) {
+        if (v) items.push(normalizeItemId(JSON.parse(v)));
+      }
+      
+      const itemMap = new Map(items.map(i => [i.id, i]));
+      return ids.map(id => itemMap.get(id)).filter(Boolean) as MediaItem[];
     } catch {
       return [];
     }
@@ -178,7 +234,31 @@ export const storageService = {
 
   async saveLibrary(items: MediaItem[]): Promise<void> {
     try {
-      await AsyncStorage.setItem(LIBRARY_KEY, JSON.stringify(items.map(normalizeItemId)));
+      const normalized = items.map(normalizeItemId);
+      const ids = normalized.map(i => i.id);
+      
+      const oldIndexRaw = await AsyncStorage.getItem(INDEX_KEY);
+      const oldIds = oldIndexRaw ? JSON.parse(oldIndexRaw) as string[] : [];
+      const removedIds = oldIds.filter(id => !ids.includes(id));
+      
+      if (removedIds.length > 0) {
+        await AsyncStorage.multiRemove(removedIds.map(id => `${MEDIA_PREFIX}${id}`));
+      }
+      
+      const chunks: [string, string][][] = [];
+      let currentChunk: [string, string][] = [[INDEX_KEY, JSON.stringify(ids)]];
+      for (const item of normalized) {
+        currentChunk.push([`${MEDIA_PREFIX}${item.id}`, JSON.stringify(item)]);
+        if (currentChunk.length >= 200) {
+          chunks.push(currentChunk);
+          currentChunk = [];
+        }
+      }
+      if (currentChunk.length > 0) chunks.push(currentChunk);
+      
+      for (const chunk of chunks) {
+        await AsyncStorage.multiSet(chunk);
+      }
     } catch (err) {
       console.error('[Storage] saveLibrary failed:', err);
       throw err;
@@ -188,80 +268,85 @@ export const storageService = {
   async addItem(item: MediaItem): Promise<MediaItem[]> {
     const current = await storageService.getLibrary();
     const updated = mergeItemInto(current, item);
-    await storageService.saveLibrary(updated);
+    
+    const normalized = normalizeItemId(item);
+    const updatedItem = updated.find(i => i.id === normalized.id);
+    if (updatedItem) {
+      await AsyncStorage.multiSet([
+        [INDEX_KEY, JSON.stringify(updated.map(i => i.id))],
+        [`${MEDIA_PREFIX}${updatedItem.id}`, JSON.stringify(updatedItem)]
+      ]);
+    }
     return updated;
   },
 
-  /**
-   * Add many matched items in one read/modify/write cycle.
-   * Critical for scans: sequential addItem was fine, but this is faster and
-   * guarantees every file from the same show is merged into localFiles.
-   */
   async addItems(items: MediaItem[]): Promise<MediaItem[]> {
     if (items.length === 0) return storageService.getLibrary();
 
     let current = await storageService.getLibrary();
+    const pairs: [string, string][] = [];
+    
     for (const item of items) {
       current = mergeItemInto(current, item);
+      const normalized = normalizeItemId(item);
+      const updatedItem = current.find(i => i.id === normalized.id);
+      if (updatedItem) {
+        pairs.push([`${MEDIA_PREFIX}${updatedItem.id}`, JSON.stringify(updatedItem)]);
+      }
     }
-    await storageService.saveLibrary(current);
-    console.log(
-      `[Storage] addItems: wrote ${items.length} match(es) → library now ${current.length} title(s)`,
-    );
+    
+    pairs.push([INDEX_KEY, JSON.stringify(current.map(i => i.id))]);
+    
+    const chunks: [string, string][][] = [];
+    for (let i = 0; i < pairs.length; i += 200) {
+      chunks.push(pairs.slice(i, i + 200));
+    }
+    for (const chunk of chunks) {
+      await AsyncStorage.multiSet(chunk);
+    }
+    
+    console.log(`[Storage] addItems: wrote ${items.length} match(es) → library now ${current.length} title(s)`);
     return current;
   },
 
   async removeItem(id: string): Promise<MediaItem[]> {
     const current = await storageService.getLibrary();
-    // getLibrary already normalizes ids; exact match is enough
     const updated = current.filter((i) => i.id !== id);
-    await storageService.saveLibrary(updated);
+    await AsyncStorage.setItem(INDEX_KEY, JSON.stringify(updated.map(i => i.id)));
+    await AsyncStorage.removeItem(`${MEDIA_PREFIX}${id}`);
     return updated;
   },
 
   async toggleStar(id: string): Promise<MediaItem[]> {
     const current = await storageService.getLibrary();
-    const updated = current.map((i) =>
-      i.id === id ? { ...i, starred: !i.starred } : i,
-    );
-    await storageService.saveLibrary(updated);
-
-    // v1.2: notify sync layer (skip if this write came from the cloud listener)
-    if (!_suppressStarHook) {
-      const changed = updated.find((i) => i.id === id);
-      if (changed) {
-        if (changed.starred) {
-          _onStarChanged?.({ action: 'starred', item: changed });
-        } else {
-          _onStarChanged?.({ action: 'unstarred', id });
-        }
+    const itemIndex = current.findIndex(i => i.id === id);
+    if (itemIndex > -1) {
+      const item = current[itemIndex];
+      item.starred = !item.starred;
+      await AsyncStorage.setItem(`${MEDIA_PREFIX}${item.id}`, JSON.stringify(item));
+      
+      if (!_suppressStarHook) {
+        if (item.starred) _onStarChanged?.({ action: 'starred', item });
+        else _onStarChanged?.({ action: 'unstarred', id });
       }
     }
-
-    return updated;
+    return current;
   },
 
   async updateItem(id: string, patch: Partial<MediaItem>): Promise<MediaItem[]> {
     const current = await storageService.getLibrary();
-    const updated = current.map((i) =>
-      i.id === id ? { ...i, ...patch } : i,
-    );
-    await storageService.saveLibrary(updated);
+    const itemIndex = current.findIndex((i) => i.id === id);
+    if (itemIndex > -1) {
+      const item = { ...current[itemIndex], ...patch };
+      current[itemIndex] = item;
+      await AsyncStorage.setItem(`${MEDIA_PREFIX}${item.id}`, JSON.stringify(item));
 
-    // v1.2: notify sync layer if starred state or lastEpisode changed
-    // Skip if this write came from the cloud listener to prevent echo loops.
-    if (!_suppressStarHook && ('starred' in patch || 'lastEpisode' in patch)) {
-      const changed = updated.find((i) => i.id === id);
-      if (changed) {
-        if (changed.starred) {
-          _onStarChanged?.({ action: 'starred', item: changed });
-        } else if ('starred' in patch && !changed.starred) {
-          _onStarChanged?.({ action: 'unstarred', id });
-        }
+      if (!_suppressStarHook && ('starred' in patch || 'lastEpisode' in patch)) {
+        if (item.starred) _onStarChanged?.({ action: 'starred', item });
+        else if ('starred' in patch && !item.starred) _onStarChanged?.({ action: 'unstarred', id });
       }
     }
-
-    return updated;
+    return current;
   },
 
   async rematchItem(oldItem: MediaItem, newItem: MediaItem): Promise<MediaItem[]> {
@@ -271,6 +356,8 @@ export const storageService = {
 
     const oldId = normalizeItemId(oldItem).id;
     const oldItemIndex = current.findIndex((i) => i.id === oldId || i.id === oldItem.id);
+    let itemRemoved = false;
+    
     if (oldItemIndex > -1) {
       const existingItem = current[oldItemIndex];
       const existingFiles = filesOf(existingItem);
@@ -280,22 +367,39 @@ export const storageService = {
 
       if (updatedFiles.length === 0) {
         current = current.filter((_, idx) => idx !== oldItemIndex);
+        await AsyncStorage.removeItem(`${MEDIA_PREFIX}${oldId}`);
+        itemRemoved = true;
       } else {
-        current[oldItemIndex] = {
+        const updatedOldItem = {
           ...existingItem,
           localFiles: updatedFiles,
           localFile: updatedFiles[0],
         };
+        current[oldItemIndex] = updatedOldItem;
+        await AsyncStorage.setItem(`${MEDIA_PREFIX}${oldId}`, JSON.stringify(updatedOldItem));
       }
     }
 
-    await storageService.saveLibrary(current);
+    if (itemRemoved) {
+      await AsyncStorage.setItem(INDEX_KEY, JSON.stringify(current.map(i => i.id)));
+    }
+    
     return await storageService.addItem(newItem);
   },
 
   async clearLibrary(): Promise<void> {
     try {
-      await AsyncStorage.removeItem(LIBRARY_KEY);
+      const indexRaw = await AsyncStorage.getItem(INDEX_KEY);
+      if (indexRaw) {
+        const ids = JSON.parse(indexRaw) as string[];
+        const keys = ids.map(id => `${MEDIA_PREFIX}${id}`);
+        keys.push(INDEX_KEY);
+        
+        for (let i = 0; i < keys.length; i += 300) {
+          await AsyncStorage.multiRemove(keys.slice(i, i + 300));
+        }
+      }
+      await AsyncStorage.removeItem(LIBRARY_KEY); // just in case
     } catch {
       // silently fail
     }
@@ -345,7 +449,9 @@ export const storageService = {
     try {
       await AsyncStorage.setItem(SCAN_STATUS_KEY, status);
       // notify hook if set
-      try { _onScanStatusChanged?.(status); } catch (e) { /* ignore */ }
+      for (const cb of _scanStatusListeners) {
+        try { cb(status); } catch (e) { /* ignore */ }
+      }
     } catch (err) {
       console.error('[Storage] saveScanStatus failed:', err);
     }
@@ -354,7 +460,9 @@ export const storageService = {
   async clearScanStatus(): Promise<void> {
     try {
       await AsyncStorage.removeItem(SCAN_STATUS_KEY);
-      try { _onScanStatusChanged?.('idle'); } catch (e) { /* ignore */ }
+      for (const cb of _scanStatusListeners) {
+        try { cb('idle'); } catch (e) { /* ignore */ }
+      }
     } catch {
       // silently fail
     }
@@ -382,7 +490,9 @@ export const storageService = {
     lastSavedVisibility = visible;
     try {
       await AsyncStorage.setItem(SCAN_FAB_VISIBLE_KEY, visible ? '1' : '0');
-      try { _onScanFabVisibilityChanged?.(visible); } catch (e) { /* ignore */ }
+      for (const cb of _scanFabVisibilityListeners) {
+        try { cb(visible); } catch (e) { /* ignore */ }
+      }
     } catch (err) {
       console.error('[Storage] saveScanFabVisibility failed:', err);
     }

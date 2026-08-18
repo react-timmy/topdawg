@@ -2,7 +2,7 @@ import React, { useState, useCallback, useEffect, useMemo } from "react";
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { View, Text, StyleSheet, FlatList, ActivityIndicator, RefreshControl, Pressable } from "react-native";
 import { useNavigation, useFocusEffect } from "@react-navigation/native";
-import { storageService } from "../storage/asyncStorage";
+import { storageService, setOnScanFabVisibilityChanged, removeOnScanFabVisibilityChanged } from "../storage/asyncStorage";
 import { MediaItem } from "../types";
 import { MediaCard } from "../components/MediaCard";
 import { FloatingHeader } from "../components/FloatingHeader";
@@ -52,10 +52,11 @@ export function TVScreen() {
         if (mounted) setScannerVisible(!!v);
       } catch (e) { /* ignore */ }
     })();
-    storageService.setOnScanFabVisibilityChanged((v) => {
+    const cb = (v: boolean) => {
       if (mounted) setScannerVisible(!!v);
-    });
-    return () => { mounted = false; storageService.setOnScanFabVisibilityChanged(null); };
+    };
+    setOnScanFabVisibilityChanged(cb);
+    return () => { mounted = false; removeOnScanFabVisibilityChanged(cb); };
   }, []);
 
   const insets = useSafeAreaInsets();

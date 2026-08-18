@@ -70,6 +70,21 @@ export default ({ config }) => ({
     "expo-font",
     "expo-file-system",
     "expo-screen-orientation",
+    [
+      "expo-build-properties",
+      {
+        android: {
+          extraGradleProperties: [
+            {
+              // AsyncStorage uses SQLite under the hood; the default Android limit is too small
+              // for large media libraries and can fail with SQLITE_FULL during dev builds.
+              name: "AsyncStorage_db_size_in_MB",
+              value: "512"
+            }
+          ]
+        }
+      }
+    ],
   ],
   extra: {
     eas: {
