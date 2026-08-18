@@ -9,7 +9,7 @@ import {
   View,
   Text,
   StyleSheet,
-  ScrollView,
+  FlatList,
   Pressable,
   ActivityIndicator,
   Image,
@@ -17,7 +17,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { Plus, Sparkles, BookMarked } from 'lucide-react-native';
-import { FilmSortLogo } from '../components/FloatingHeader';
+import { FloatingHeader } from '../components/FloatingHeader';
 import { Collection } from '../types';
 import { collectionsService } from '../storage/collectionsService';
 import { CollectionCard } from '../components/CollectionCard';
@@ -30,6 +30,7 @@ export function CollectionsScreen() {
   const [collections, setCollections] = useState<Collection[]>([]);
   const [loading, setLoading] = useState(true);
   const [createModalVisible, setCreateModalVisible] = useState(false);
+  const [headerHeight, setHeaderHeight] = useState<number>(0);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -59,9 +60,13 @@ export function CollectionsScreen() {
     }
   };
 
-  const handlePressCollection = (collection: Collection) => {
+  const handlePressCollection = useCallback((collection: Collection) => {
     navigation.navigate('CollectionDetail', { collection });
-  };
+  }, [navigation]);
+
+  const renderItem = useCallback(({ item }: { item: Collection }) => (
+    <CollectionCard collection={item} onPress={() => handlePressCollection(item)} />
+  ), [handlePressCollection]);
 
   const renderContent = () => {
     if (loading) {
@@ -85,39 +90,37 @@ export function CollectionsScreen() {
     }
 
     return (
-      <ScrollView
+      <FlatList
+        data={collections}
+        keyExtractor={(c) => c.id}
+        renderItem={renderItem}
         contentContainerStyle={[
           styles.scrollContent,
           { paddingBottom: insets.bottom + 80 },
         ]}
         showsVerticalScrollIndicator={false}
-      >
-        {collections.map((item) => (
-          <CollectionCard
-            key={item.id}
-            collection={item}
-            onPress={() => handlePressCollection(item)}
-          />
-        ))}
-      </ScrollView>
+        initialNumToRender={6}
+        maxToRenderPerBatch={8}
+        windowSize={8}
+        removeClippedSubviews
+      />
     );
   };
 
   return (
     <View style={styles.root}>
-      <View style={[styles.header, { paddingTop: insets.top + 14 }]}>
-        <View style={styles.headerTitleGroup}>
-          <FilmSortLogo />
-          <View>
-            <Text style={styles.headerTitle}>Collections</Text>
-            <Text style={styles.headerSubtitle}>
-              Your curated movie &amp; TV shelves
-            </Text>
-          </View>
-        </View>
-      </View>
+      <FloatingHeader
+        title="Collections"
+        subtitle="Your curated movie & TV shelves"
+        onSearchPress={() => navigation.navigate('CollectionsSearch')}
+        onHeightChange={(h) => setHeaderHeight(h)}
+        showLogo
+      />
 
-      {renderContent()}
+      {/* Content needs top padding to avoid being overlapped by the absolute header */}
+      <View style={{ flex: 1, paddingTop: headerHeight }}>
+        {renderContent()}
+      </View>
 
       <View style={[styles.fabContainer, { right: -15, bottom: insets.bottom + 55 }]}>
         <Pressable

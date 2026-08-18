@@ -15,6 +15,7 @@ import { JoinWatchPartyScreen } from '../screens/JoinWatchPartyScreen';
 import { CreatePartyScreen } from '../screens/CreatePartyScreen';
 import { CollectionDetailScreen } from '../screens/CollectionDetailScreen';
 import { CollectionsScreen } from '../screens/CollectionsScreen';
+import { CollectionsSearchScreen } from '../screens/CollectionsSearchScreen';
 import { PartyHubScreen } from '../screens/PartyHubScreen';
 import { ProfileScreen } from '../screens/ProfileScreen';
 import { AddToCollectionScreen } from '../screens/AddToCollectionScreen';
@@ -68,6 +69,7 @@ export function RootNavigator() {
         options={{ animation: 'slide_from_bottom' }}
       />
       <Stack.Screen name="Collections" component={CollectionsScreen} />
+      <Stack.Screen name="CollectionsSearch" component={CollectionsSearchScreen} />
       <Stack.Screen
         name="CollectionDetail"
         component={CollectionDetailScreen}

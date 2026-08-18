@@ -14,8 +14,8 @@ import {
   Pressable,
   ScrollView,
   Dimensions,
-  Image,
 } from 'react-native';
+import CachedImage from './CachedImage';
 import { Collection } from '../types';
 import { Sparkles, Film } from 'lucide-react-native';
 
@@ -30,7 +30,7 @@ interface CollectionCardProps {
   onPress: () => void;
 }
 
-export function CollectionCard({ collection, onPress }: CollectionCardProps) {
+export const CollectionCard = React.memo(function CollectionCard({ collection, onPress }: CollectionCardProps) {
   // ── Empty state ────────────────────────────────────────────────────────────
   if (collection.items.length === 0) {
     return (
@@ -64,7 +64,7 @@ export function CollectionCard({ collection, onPress }: CollectionCardProps) {
         {collection.items.map((item, index) => (
           <View key={`${item.id}-${index}`} style={styles.posterContainer}>
             {item.posterUrl ? (
-              <Image source={{ uri: item.posterUrl }} style={styles.poster} />
+            <CachedImage uri={item.posterUrl} style={styles.poster} />
             ) : (
               <View style={[styles.poster, styles.posterPlaceholder]}>
                 <Text style={styles.posterPlaceholderText}>{item.title[0]}</Text>
@@ -80,11 +80,11 @@ export function CollectionCard({ collection, onPress }: CollectionCardProps) {
       </ScrollView>
     </View>
   );
-}
+});
 
 // ─── Shared header ─────────────────────────────────────────────────────────────
 
-function CollectionHeader({ collection }: { collection: Collection }) {
+const CollectionHeader = React.memo(function CollectionHeader({ collection }: { collection: Collection }) {
   return (
     <View style={styles.header}>
       <View style={styles.titleRow}>
@@ -102,7 +102,7 @@ function CollectionHeader({ collection }: { collection: Collection }) {
       </View>
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   card: {
