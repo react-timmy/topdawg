@@ -115,24 +115,11 @@ export function ScannerScreen() {
         setRecentLoaded(true);
       }
 
-      // Also restore last scan summary so the full scan UI can reflect
-      // the most recent completed scan even if the user was away during it.
+      // Also restore unmatched files from last scan summary.
+      // (Recently matched is already restored above from getRecentlyMatched)
       try {
         const last = await storageService.getLastScanResult();
         if (last) {
-          // Build a MediaScanResult-like object to reuse existing handler
-          const fakeResult: MediaScanResult = {
-            matched: (last.matched || []).map((m) => ({
-              id: m.id ?? 'unknown',
-              title: m.title ?? 'Unknown',
-              posterUrl: m.posterUrl,
-              // localFile unavailable here; ScannerScreen will merge from storage
-            })) as any,
-            unmatched: (last.unmatched || []).map((u) => ({ uri: u.uri ?? '', filename: u.filename ?? '' })) as any,
-          };
-          // Populate UI state via existing handler — it will merge gracefully
-          void handleScanComplete(fakeResult);
-          // Show the unmatched files in the Scanner UI as well
           if (!cancelled && mountedRef.current) {
             setUnmatchedFiles((last.unmatched || []).map((u) => ({ uri: u.uri ?? '', filename: u.filename ?? '' })));
           }
@@ -205,6 +192,19 @@ export function ScannerScreen() {
       if (mountedRef.current) setUnmatchedFiles(result.unmatched);
     } else {
       if (mountedRef.current) setUnmatchedFiles([]);
+    }
+  }, []);
+
+  const handleClearUnmatched = useCallback(async () => {
+    if (mountedRef.current) setUnmatchedFiles([]);
+    try {
+      const last = await storageService.getLastScanResult();
+      if (last) {
+        last.unmatched = [];
+        await storageService.saveLastScanResult(last);
+      }
+    } catch (e) {
+      // ignore
     }
   }, []);
 
@@ -282,6 +282,7 @@ export function ScannerScreen() {
             files={unmatchedFiles}
             onMatchSuccess={handleMatchSuccess}
             onIgnore={handleIgnore}
+            onClear={handleClearUnmatched}
           />
         )}
       </ScrollView>

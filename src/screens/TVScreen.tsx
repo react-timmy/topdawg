@@ -2,14 +2,14 @@ import React, { useState, useCallback, useEffect, useMemo } from "react";
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { View, Text, StyleSheet, FlatList, ActivityIndicator, RefreshControl, Pressable } from "react-native";
 import { useNavigation, useFocusEffect } from "@react-navigation/native";
-import { storageService } from "../storage/asyncStorage";
+import { storageService, setOnScanFabVisibilityChanged, removeOnScanFabVisibilityChanged } from "../storage/asyncStorage";
 import { MediaItem } from "../types";
 import { MediaCard } from "../components/MediaCard";
 import { FloatingHeader } from "../components/FloatingHeader";
 import { ScanFab } from "../components/ScanFab";
 import Animated, { useSharedValue , FadeIn } from "react-native-reanimated";
 import { Tv, ScanLine } from "lucide-react-native";
-import { watchProgressService, setOnProgressChanged } from "../storage/watchProgressService";
+import { watchProgressService, addProgressChangeListener, removeProgressChangeListener } from "../storage/watchProgressService";
 
 function TVEmptyState() {
   const navigation = useNavigation<any>();
@@ -52,10 +52,11 @@ export function TVScreen() {
         if (mounted) setScannerVisible(!!v);
       } catch (e) { /* ignore */ }
     })();
-    storageService.setOnScanFabVisibilityChanged((v) => {
+    const cb = (v: boolean) => {
       if (mounted) setScannerVisible(!!v);
-    });
-    return () => { mounted = false; storageService.setOnScanFabVisibilityChanged(null); };
+    };
+    setOnScanFabVisibilityChanged(cb);
+    return () => { mounted = false; removeOnScanFabVisibilityChanged(cb); };
   }, []);
 
   const insets = useSafeAreaInsets();
@@ -93,14 +94,14 @@ export function TVScreen() {
 
     void fetchLastPlayed();
 
-    // Refresh when any progress changes (markAsPlayed / save / clear)
-    setOnProgressChanged(() => {
+    const handler = () => {
       void fetchLastPlayed();
-    });
+    };
+    addProgressChangeListener(handler);
 
     return () => {
       mounted = false;
-      setOnProgressChanged(null);
+      removeProgressChangeListener(handler);
     };
   }, [trending]);
 

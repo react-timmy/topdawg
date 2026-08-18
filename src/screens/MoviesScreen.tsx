@@ -2,14 +2,14 @@ import React, { useState, useCallback, useEffect, useMemo } from "react";
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { View, Text, StyleSheet, ActivityIndicator, FlatList, RefreshControl, Pressable } from "react-native";
 import { useNavigation, useFocusEffect } from "@react-navigation/native";
-import { storageService } from "../storage/asyncStorage";
+import { storageService, setOnScanFabVisibilityChanged, removeOnScanFabVisibilityChanged } from "../storage/asyncStorage";
 import { MediaItem } from "../types";
 import { MediaCard } from "../components/MediaCard";
 import { FloatingHeader } from "../components/FloatingHeader";
 import { ScanFab } from "../components/ScanFab";
 import Animated, { useSharedValue , FadeIn } from "react-native-reanimated";
 import { Film, ScanLine } from "lucide-react-native";
-import { watchProgressService, setOnProgressChanged } from "../storage/watchProgressService";
+import { watchProgressService, addProgressChangeListener, removeProgressChangeListener } from "../storage/watchProgressService";
 
 function MoviesEmptyState() {
   const navigation = useNavigation<any>();
@@ -53,10 +53,11 @@ export function MoviesScreen() {
         if (mounted) setScannerVisible(!!v);
       } catch (e) { /* ignore */ }
     })();
-    storageService.setOnScanFabVisibilityChanged((v) => {
+    const cb = (v: boolean) => {
       if (mounted) setScannerVisible(!!v);
-    });
-    return () => { mounted = false; storageService.setOnScanFabVisibilityChanged(null); };
+    };
+    setOnScanFabVisibilityChanged(cb);
+    return () => { mounted = false; removeOnScanFabVisibilityChanged(cb); };
   }, []);
 
   const insets = useSafeAreaInsets();
@@ -111,8 +112,8 @@ export function MoviesScreen() {
       };
       void fetchLastPlayed();
     };
-    setOnProgressChanged(handler);
-    return () => { setOnProgressChanged(null); };
+    addProgressChangeListener(handler);
+    return () => { removeProgressChangeListener(handler); };
   }, [items]);
 
   // Sort items by last played (most recent first)

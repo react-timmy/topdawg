@@ -82,7 +82,7 @@ function AvatarBubble({
         source={{ uri: photoUrl }}
         style={[
           styles.avatarBubble,
-          { width: size, height: size, borderRadius: size / 2 },
+          { width: size, height: size, borderRadius: 12 },
         ]}
       />
     );
@@ -91,7 +91,7 @@ function AvatarBubble({
     <View
       style={[
         styles.avatarBubble,
-        { width: size, height: size, borderRadius: size / 2, backgroundColor: color },
+        { width: size, height: size, borderRadius: 12, backgroundColor: color },
       ]}
     >
       <Text style={{ fontSize }}>{emoji}</Text>
@@ -112,30 +112,33 @@ function SignedOutView({
 }) {
   return (
     <Animated.View entering={FadeIn.duration(400)} style={styles.signedOutRoot}>
-      {/* App icon / logo */}
-      <Animated.View entering={ZoomIn.delay(100).duration(500)} style={styles.logoRing}>
-        <Clapperboard size={44} color="#ffffff" strokeWidth={1.8} />
+      <Animated.View entering={FadeInDown.delay(100).duration(500)} style={styles.brandContainer}>
+        <Image source={require('../../assets/images/icon.png')} style={styles.brandIcon} resizeMode="contain" />
+        <Text style={styles.brandText}>FilmSort</Text>
       </Animated.View>
 
-      <Animated.Text entering={FadeInDown.delay(200).duration(400)} style={styles.appName}>
-        FilmSort
-      </Animated.Text>
-      <Animated.Text entering={FadeInDown.delay(260).duration(400)} style={styles.appTagline}>
-        Your personal movie & TV library
-      </Animated.Text>
+      <Animated.View entering={FadeInUp.delay(200).duration(400)} style={styles.signInCard}>
+        <Text style={styles.signInTitle}>Sign in</Text>
+        <Text style={styles.signInSubtitle}>
+          to continue to FilmSort
+        </Text>
 
-      <Animated.View entering={FadeInUp.delay(340).duration(400)} style={styles.signedOutActions}>
-        {/* Google button */}
+        {signInError ? (
+          <View style={styles.errorBox}>
+            <Text style={styles.errorText}>{signInError}</Text>
+          </View>
+        ) : null}
+
         <Pressable
           style={({ pressed }) => [
             styles.googleBtn,
-            (pressed || signingIn) && { opacity: 0.85 },
+            (pressed || signingIn) && { opacity: 0.8 },
           ]}
           onPress={onSignIn}
           disabled={signingIn}
         >
           {signingIn ? (
-            <ActivityIndicator color="#1a1a1a" size="small" />
+            <ActivityIndicator color="#ffffff" size="small" />
           ) : (
             <>
               <Text style={styles.googleG}>G</Text>
@@ -144,12 +147,8 @@ function SignedOutView({
           )}
         </Pressable>
 
-        {signInError ? (
-          <Text style={styles.errorText}>{signInError}</Text>
-        ) : null}
-
-        <Text style={styles.signedOutHint}>
-          Sign in to back up your history and badges across devices.
+        <Text style={styles.signInFooter}>
+          By signing in, you agree to FilmSort's Conditions of Use and Privacy Notice.
         </Text>
       </Animated.View>
     </Animated.View>
@@ -511,70 +510,83 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 36,
-    gap: 0,
+    paddingHorizontal: 24,
     width: '100%',
   },
-  logoRing: {
-    width: 96,
-    height: 96,
-    borderRadius: 48,
-    backgroundColor: NF_RED,
+  brandContainer: {
     alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 20,
+    marginBottom: 40,
   },
-  appName: {
-    color: '#ffffff',
-    fontSize: 34,
-    fontWeight: '900',
-    letterSpacing: -0.8,
+  brandIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    overflow: 'hidden',
     marginBottom: 8,
   },
-  appTagline: {
-    color: '#52525b',
-    fontSize: 15,
-    fontWeight: '500',
-    textAlign: 'center',
-    marginBottom: 48,
+  brandText: {
+    color: '#ffffff',
+    fontSize: 26,
+    fontWeight: '800',
+    letterSpacing: -0.5,
   },
-  signedOutActions: {
+  signInCard: {
     width: '100%',
-    alignItems: 'center',
-    gap: 14,
-    marginTop: 140, // increased to push the sign-in action further down
+    backgroundColor: '#191E24',
+    borderRadius: 8,
+    padding: 24,
+    borderWidth: 1,
+    borderColor: '#333A44',
+  },
+  signInTitle: {
+    color: '#ffffff',
+    fontSize: 22,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  signInSubtitle: {
+    color: '#8192A5',
+    fontSize: 15,
+    marginBottom: 24,
   },
   googleBtn: {
     width: '100%',
-    height: 54,
-    borderRadius: 14,
-    backgroundColor: '#ffffff',
+    height: 48,
+    borderRadius: 4,
+    backgroundColor: NF_RED,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 10,
+    gap: 12,
   },
   googleG: {
-    color: '#4285F4',
+    color: '#ffffff',
     fontSize: 18,
     fontWeight: '900',
   },
   googleBtnText: {
-    color: '#1a1a1a',
+    color: '#ffffff',
     fontSize: 16,
-    fontWeight: '700',
+    fontWeight: '600',
+  },
+  errorBox: {
+    backgroundColor: 'rgba(217, 39, 39, 0.1)',
+    borderLeftWidth: 4,
+    borderColor: '#d92727',
+    padding: 12,
+    marginBottom: 20,
+    borderRadius: 4,
   },
   errorText: {
-    color: '#f87171',
-    fontSize: 13,
+    color: '#ff6b6b',
+    fontSize: 14,
     fontWeight: '500',
-    textAlign: 'center',
   },
-  signedOutHint: {
-    color: '#3f3f46',
-    fontSize: 13,
-    textAlign: 'center',
-    lineHeight: 20,
+  signInFooter: {
+    color: '#8192A5',
+    fontSize: 12,
+    marginTop: 24,
+    lineHeight: 18,
   },
 
   // ── Signed-in ──────────────────────────────────────────────────────────────
@@ -594,8 +606,10 @@ const styles = StyleSheet.create({
   },
   profileRow: {
     position: 'relative',
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 16,
   },
   profileCardWrap: {
     alignItems: 'center',

@@ -39,12 +39,14 @@ interface UnmatchedFilesListProps {
   files: LocalFile[];
   onMatchSuccess: (file: LocalFile, matchedItem: MediaItem) => void;
   onIgnore: (file: LocalFile) => void;
+  onClear?: () => void;
 }
 
 export function UnmatchedFilesList({
   files,
   onMatchSuccess,
   onIgnore,
+  onClear,
 }: UnmatchedFilesListProps) {
   const { isPro } = usePro();
   const [selectedFile, setSelectedFile] = useState<LocalFile | null>(null);
@@ -217,9 +219,16 @@ function parseSeasonEpisode(filename: string): { season: number | null; episode:
 
   return (
     <View style={styles.container}>
-      <View style={styles.sectionHeader}>
-        <AlertCircle size={16} color="#f87171" />
-        <Text style={styles.sectionTitle}>Unmatched Files ({files.length})</Text>
+      <View style={[styles.sectionHeader, { justifyContent: 'space-between' }]}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <AlertCircle size={16} color="#f87171" />
+          <Text style={styles.sectionTitle}>Unmatched Files ({files.length})</Text>
+        </View>
+        {onClear && (
+          <Pressable onPress={onClear} hitSlop={10} style={styles.dismissBtn}>
+            <X size={14} color="#71717a" />
+          </Pressable>
+        )}
       </View>
       <Text style={styles.sectionDesc}>
         These video files could not be identified automatically. Tap to manually search and match them.
@@ -228,7 +237,11 @@ function parseSeasonEpisode(filename: string): { season: number | null; episode:
       <FlatList
         data={files}
         keyExtractor={(item) => item.uri}
-        scrollEnabled={false}
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.listContent}
+        initialNumToRender={5}
+        windowSize={5}
         renderItem={({ item }) => (
           <Animated.View
             layout={Layout.springify()}
@@ -238,7 +251,7 @@ function parseSeasonEpisode(filename: string): { season: number | null; episode:
             <View style={styles.fileCardContent}>
               <HelpCircle size={20} color="#71717a" style={styles.fileIcon} />
               <View style={styles.fileInfo}>
-                <Text style={styles.filename} numberOfLines={2}>
+                <Text style={styles.filename} numberOfLines={1}>
                   {fileLabel(item)}
                 </Text>
                 <Text style={styles.fileUri} numberOfLines={1}>
@@ -431,8 +444,13 @@ function parseSeasonEpisode(filename: string): { season: number | null; episode:
 
 const styles = StyleSheet.create({
   container: {
-    marginTop: 24,
-    width: "100%",
+    backgroundColor: '#111113',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
+    padding: 16,
+    marginTop: 20,
+    width: '100%',
   },
   sectionHeader: {
     flexDirection: "row",
@@ -445,19 +463,32 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "800",
   },
+  dismissBtn: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   sectionDesc: {
     color: "#71717a",
     fontSize: 12,
     lineHeight: 18,
     marginBottom: 14,
   },
+  listContent: {
+    gap: 12,
+    paddingBottom: 4,
+  },
   fileCard: {
-    backgroundColor: "#111113",
+    width: 280,
+    backgroundColor: "rgba(255,255,255,0.02)",
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.06)",
+    borderColor: "rgba(255,255,255,0.05)",
     padding: 14,
-    marginBottom: 10,
+    marginRight: 10,
     gap: 12,
   },
   fileCardContent: {
@@ -470,6 +501,7 @@ const styles = StyleSheet.create({
   },
   fileInfo: {
     flex: 1,
+    minWidth: 0,
     gap: 3,
   },
   filename: {

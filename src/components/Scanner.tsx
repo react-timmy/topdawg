@@ -67,6 +67,18 @@ const PENDING_DISAMBIG_KEY = "@cinescan:pending_disambiguation";
 // Scanner component unmount/remount within the same app session (not app restart).
 const pendingDisambiguationResolves: Map<string, (id: string | null) => void> = new Map();
 
+type DisambiguationOption = { title: string; year: string; id: string; posterUrl?: string };
+type DisambiguationData = {
+  id?: string;
+  filename: string;
+  title: string;
+  options: DisambiguationOption[];
+};
+
+// Active state setters bound to the currently mounted Scanner instance
+let activeDisambiguationSetter: ((data: DisambiguationData | null) => void) | null = null;
+
+
 /** Seconds the on-screen Cancel control stays available. */
 const CANCEL_WINDOW_MS = 5000;
 
@@ -425,14 +437,14 @@ export function Scanner({ onScanComplete }: ScannerProps) {
   const handleScanLibraryRef = useRef<() => Promise<void>>(async () => {});
   const [cancelCountdown, setCancelCountdown] = useState(scanSession.cancelUntil);
 
-  type DisambiguationOption = { title: string; year: string; id: string; posterUrl?: string };
-  type DisambiguationData = {
-    id?: string;
-    filename: string;
-    title: string;
-    options: DisambiguationOption[];
-  };
   const [disambiguation, setDisambiguation] = useState<DisambiguationData | null>(null);
+
+  useEffect(() => {
+    activeDisambiguationSetter = setDisambiguation;
+    return () => {
+      activeDisambiguationSetter = null;
+    };
+  }, [setDisambiguation]);
 
   useEffect(() => {
     scanStateRef.current = scanState;
@@ -1139,7 +1151,11 @@ export function Scanner({ onScanComplete }: ScannerProps) {
           }
 
           // App is active — show modal and wait for user choice
-          setDisambiguation({ id: pendingId, filename, title, options });
+          if (activeDisambiguationSetter) {
+            activeDisambiguationSetter({ id: pendingId, filename, title, options });
+          } else {
+            setDisambiguation({ id: pendingId, filename, title, options });
+          }
 
           return new Promise<string | null>((resolve) => {
             pendingDisambiguationResolves.set(pendingId, (val: string | null) => {

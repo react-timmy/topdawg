@@ -40,6 +40,9 @@ export function FilmSortLogo() {
       <View style={[logoStyles.rect, logoStyles.leftBar]} />
       <View style={[logoStyles.rect, logoStyles.topBar]} />
       <View style={[logoStyles.rect, logoStyles.midBar]} />
+      
+      {/* Play Icon */}
+      <View style={logoStyles.playIcon} />
     </View>
   );
 }
@@ -53,7 +56,7 @@ const logoStyles = StyleSheet.create({
   },
   rect: {
     position: 'absolute',
-    backgroundColor: '#8c185c', // dark red (Netflix shadow tone)
+    backgroundColor: '#ca5100ff', // dark red (Netflix shadow tone)
   },
   // Left vertical bar
   leftBar: {
@@ -86,15 +89,15 @@ const logoStyles = StyleSheet.create({
   },
   playIcon: {
 position: 'absolute',
-left:14,
-top: 26,
+left: 15,
+top: 29,
 width: 0, 
 height: 0, 
 backgroundColor: 'transparent',
 borderStyle: 'solid', 
-borderLeftWidth: 12,
+borderLeftWidth: 17,
 borderRightWidth: 0,
-borderBottomWidth: 8,
+borderBottomWidth: 10,
 borderTopWidth: 8,
 borderLeftColor: '#ffffff', 
 borderRightColor: 'transparent',
@@ -154,7 +157,7 @@ export function FloatingHeader({
               onPress={() => navigation.navigate("Notifications")}
               hitSlop={10}
             >
-              <Bell size={19} color={unreadCount > 0 ? "#facc15" : "#52525b"} />
+              <Bell size={19} color={unreadCount > 0 ? "#ca5100ff" : "#52525b"} />
               {unreadCount > 0 && (
                 <View style={styles.badge}>
                   <Text style={styles.badgeText}>{unreadCount > 9 ? "9+" : String(unreadCount)}</Text>

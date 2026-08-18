@@ -630,7 +630,6 @@ export function VideoPlayerScreen() {
     try { StatusBar.setHidden(immersive, 'fade'); } catch { /* ignore */ }
     if (Platform.OS !== 'android') return;
     try {
-      await NavigationBar.setBehaviorAsync('overlay-swipe');
       await NavigationBar.setButtonStyleAsync('light');
       await NavigationBar.setVisibilityAsync(immersive ? 'hidden' : 'visible');
     } catch { /* ignore */ }
@@ -638,16 +637,7 @@ export function VideoPlayerScreen() {
 
   useEffect(() => {
     void setSystemUiImmersive(true);
-    let sub: { remove: () => void } | undefined;
-    if (Platform.OS === 'android') {
-      try {
-        sub = NavigationBar.addVisibilityListener(({ visibility }) => {
-          if (visibility === 'visible') void NavigationBar.setVisibilityAsync('hidden');
-        });
-      } catch { /* ignore */ }
-    }
     return () => {
-      sub?.remove();
       try { StatusBar.setHidden(false, 'fade'); } catch { /* ignore */ }
       if (Platform.OS === 'android') void NavigationBar.setVisibilityAsync('visible').catch(() => {});
     };
@@ -1257,7 +1247,6 @@ export function VideoPlayerScreen() {
         <VideoView
           style={[styles.video, (episodesOpen || subtitleOpen) && { opacity: 0.45 }]}
           player={player}
-          allowsFullscreen={false}
           allowsPictureInPicture
           nativeControls={false}
           contentFit={videoFill ? 'cover' : 'contain'}
