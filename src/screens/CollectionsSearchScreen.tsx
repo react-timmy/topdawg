@@ -1,53 +1,47 @@
-import React, { useState } from 'react';
-import {
-  View,
-  StyleSheet,
-  FlatList,
-  TextInput,
-  ActivityIndicator,
-  Text,
-  Pressable,
-  StatusBar,
-} from 'react-native';
-import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
+import React, { useState, useEffect } from 'react';
+import { View, StyleSheet, FlatList, TextInput, ActivityIndicator, Text, Pressable, StatusBar } from 'react-native';
+import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ChevronLeft, Search, X } from 'lucide-react-native';
-import { storageService } from '../storage/asyncStorage';
-import { MediaItem, RootStackParamList } from '../types';
-import { MediaCard } from '../components/MediaCard';
+import { collectionsService } from '../storage/collectionsService';
+import { Collection } from '../types';
+import { CollectionCard } from '../components/CollectionCard';
 
-type SearchScreenRouteProp = RouteProp<RootStackParamList, 'Search'>;
-
-export function SearchScreen() {
+export function CollectionsSearchScreen() {
   const navigation = useNavigation<any>();
-  const route = useRoute<SearchScreenRouteProp>();
   const insets = useSafeAreaInsets();
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<MediaItem[]>([]);
+  const [results, setResults] = useState<Collection[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // Get the optional onSelect callback from route params
-  const onSelect = route.params?.onSelect;
+  useEffect(() => {
+    // preload collections for faster searching
+    (async () => {
+      setLoading(true);
+      try {
+        await collectionsService.getAll();
+      } catch (e) {
+        console.warn('[CollectionsSearch] preload failed', e);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
 
   const handleSearch = async (text: string) => {
     setQuery(text);
-    if (text.length < 2) {
+    if (text.length < 1) {
       setResults([]);
       return;
     }
     setLoading(true);
     try {
-      const library = await storageService.getLibrary();
-      const lowerQuery = text.toLowerCase();
-      const filtered = library.filter(
-        (item) =>
-          item.title.toLowerCase().includes(lowerQuery) ||
-          (item.description && item.description.toLowerCase().includes(lowerQuery)) ||
-          (item.genres && item.genres.some((g) => g.toLowerCase().includes(lowerQuery))),
-      );
+      const all = await collectionsService.getCollections();
+      const lower = text.toLowerCase();
+      const filtered = all.filter((c) => c.name.toLowerCase().includes(lower));
       setResults(filtered);
     } catch (e) {
-      console.error('Local search failed:', e);
+      console.error('[CollectionsSearch] search failed', e);
     } finally {
       setLoading(false);
     }
@@ -58,33 +52,24 @@ export function SearchScreen() {
     setResults([]);
   };
 
-  const handleItemPress = (item: MediaItem) => {
-    if (onSelect) {
-      // If there's a callback, invoke it and go back
-      onSelect(item);
-      navigation.goBack();
-    } else {
-      // Default behavior: navigate to Details
-      navigation.navigate('Details', { item });
-    }
+  const handlePress = (collection: Collection) => {
+    navigation.navigate('CollectionDetail', { collection });
   };
 
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" />
 
-      {/* ── Top bar ── */}
       <View style={[styles.topBar, { paddingTop: insets.top + 6 }]}>
         <Pressable onPress={() => navigation.goBack()} hitSlop={12} style={styles.backBtn}>
           <ChevronLeft size={22} color="#ffffff" strokeWidth={2.4} />
         </Pressable>
 
-        {/* Search input */}
         <View style={styles.inputWrap}>
           <Search size={16} color="#9aa4b2" strokeWidth={2} style={styles.inputIcon} />
           <TextInput
             style={styles.input}
-            placeholder="Search title, genre, description…"
+            placeholder="Search collections…"
             placeholderTextColor="#9aa4b2"
             value={query}
             onChangeText={handleSearch}
@@ -100,7 +85,6 @@ export function SearchScreen() {
         </View>
       </View>
 
-      {/* ── Results ── */}
       {loading ? (
         <ActivityIndicator size="small" color="#ffffff" style={styles.spinner} />
       ) : (
@@ -108,16 +92,14 @@ export function SearchScreen() {
           data={results}
           keyExtractor={(item) => item.id}
           renderItem={({ item, index }) => (
-            <MediaCard item={item} index={index} onPress={() => handleItemPress(item)} />
+            <CollectionCard collection={item} onPress={() => handlePress(item)} />
           )}
           contentContainerStyle={[styles.list, { paddingBottom: insets.bottom + 24 }]}
-          keyboardDismissMode="on-drag"
-          keyboardShouldPersistTaps="handled"
           ListEmptyComponent={
-            query.length >= 2 ? (
-              <Text style={styles.emptyText}>{`No results for "${query}"`}</Text>
+            query.length >= 1 ? (
+              <Text style={styles.emptyText}>{`No collections match "${query}"`}</Text>
             ) : (
-              <Text style={styles.emptyText}>Start typing to search your library</Text>
+              <Text style={styles.emptyText}>Start typing to search your collections</Text>
             )
           }
         />
@@ -128,7 +110,6 @@ export function SearchScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#05050a' },
-
   topBar: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -170,9 +151,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     paddingVertical: 0,
   },
-
   spinner: { marginTop: 32 },
-
   list: { paddingHorizontal: 16, paddingTop: 18 },
   emptyText: {
     color: '#7c88a0',

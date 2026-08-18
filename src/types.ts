@@ -15,6 +15,7 @@ export type RootStackParamList = {
   JoinWatchParty: undefined;
   CreateParty: undefined;
   Collections: undefined;
+  CollectionsSearch: undefined;
   PartyHub: undefined;
   Profile: undefined;
   CollectionDetail: { collection: Collection };
