@@ -50,7 +50,7 @@ import {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const NF_RED = '#E50914';
+const NF_RED = '#ca5100ff';
 
 // ─── Avatar bubble ────────────────────────────────────────────────────────────
 
@@ -532,7 +532,7 @@ const styles = StyleSheet.create({
   },
   signInCard: {
     width: '100%',
-    backgroundColor: '#191E24',
+    backgroundColor: 'transparent',
     borderRadius: 8,
     padding: 24,
     borderWidth: 1,
