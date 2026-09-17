@@ -148,7 +148,7 @@ function SignedOutView({
         </Pressable>
 
         <Text style={styles.signInFooter}>
-          By signing in, you agree to FilmSort's Conditions of Use and Privacy Notice.
+          By signing in, you agree to FilmSort&apos;s Conditions of Use and Privacy Notice.
         </Text>
       </Animated.View>
     </Animated.View>
