@@ -25,3 +25,25 @@ yarn-error.log*
 # Firebase native config — never commit these
 GoogleService-Info.plist
 google-services.json
+
+# Next.js build output (should never be in this repo)
+.next/
+
+# Kiro IDE files
+.kiro/
+.agents/
+skills-lock.json
+
+# Crash dumps and temp files
+core.*
+*.tmp
+*.bak
+*.orig
+*.log
+
+# Loose screenshots / mockup images at repo root
+registerandprofileselectscreenui.jpg
+videoplayer.png
+
+# Dev utility scripts
+patch_asyncStorage.sh
